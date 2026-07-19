@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -220,6 +220,57 @@ class RetrievalBenchmarkDatasetTests(unittest.TestCase):
         self.assertIn("sample-field-rules", stdout)
         self.assertIn("Agent记忆字段规范", stdout)
         self.assertIn("工作流/Agent记忆字段规范.md", stdout)
+
+    def test_vector_benchmark_uses_the_serialized_collection_lock(self) -> None:
+        parsed = Namespace(
+            limit=5,
+            json=True,
+            no_vector=False,
+            case_id=["sample-field-rules"],
+            benchmark_file="",
+            show_private_details=False,
+            lock_timeout=9.0,
+        )
+        lock_calls: list[tuple[bool, float]] = []
+
+        @contextmanager
+        def recorded_lock(*, exclusive: bool, timeout: float):
+            lock_calls.append((exclusive, timeout))
+            yield
+
+        connection = mock.Mock()
+        store = mock.Mock()
+        embedder = mock.Mock()
+        zvec_module = mock.Mock(
+            DEFAULT_COLLECTION_PATH=Path("/fake/zvec"),
+            DEFAULT_EMBEDDING_DIM=768,
+            DEFAULT_MODEL="fake-model",
+            DEFAULT_DEVICE="cpu",
+            zvec_lock=recorded_lock,
+            connect=mock.Mock(return_value=connection),
+            ZvecStore=mock.Mock(return_value=store),
+            EmbeddingGemmaEmbedder=mock.Mock(return_value=embedder),
+        )
+        stream = io.StringIO()
+        with (
+            mock.patch.object(benchmark, "parse_args", return_value=parsed),
+            mock.patch.object(benchmark, "load_module", side_effect=[object(), zvec_module]),
+            mock.patch.object(
+                benchmark,
+                "run_sqlite",
+                return_value=["工作流/Agent记忆字段规范.md"],
+            ),
+            mock.patch.object(
+                benchmark,
+                "run_vector",
+                return_value=["工作流/Agent记忆字段规范.md"],
+            ),
+            redirect_stdout(stream),
+        ):
+            self.assertEqual(benchmark.main(), 0)
+
+        self.assertEqual(lock_calls, [(True, 9.0)])
+        connection.close.assert_called_once_with()
 
     def test_explicit_input_errors_are_content_free_and_nonzero(self) -> None:
         with tempfile.TemporaryDirectory(prefix="PRIVATE_RETRIEVAL_DIR_") as raw_tmp:

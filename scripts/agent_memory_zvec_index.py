@@ -1044,9 +1044,12 @@ def main() -> int:
     args = parse_args()
     if not (args.init or args.scan or args.prune or args.report or args.changed_file or args.search):
         args.init = True
-    exclusive = bool(args.init or args.scan or args.prune or args.changed_file)
     try:
-        with zvec_lock(exclusive=exclusive, timeout=args.lock_timeout):
+        # The current Zvec collection opens read-write even for queries and its
+        # native LOCK cannot be shared safely by separate processes.  Serialize
+        # readers and writers through the public lock to avoid transient probe
+        # and search failures under concurrent model loads.
+        with zvec_lock(exclusive=True, timeout=args.lock_timeout):
             return run_locked(args)
     except TimeoutError as exc:
         if args.json:
