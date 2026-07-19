@@ -123,7 +123,12 @@ def main() -> int:
         forwarded.extend(["--agent-scope", args.actor])
     env = os.environ.copy()
     env["MEMORY_ACTOR"] = args.actor
-    return subprocess.run([str(target), *forwarded], env=env, check=False).returncode
+    command = [str(target), *forwarded]
+    if command_name == "zvec":
+        # Zvec and the embedding stack live in the pinned semantic runtime,
+        # not necessarily in the Python that launched memoryctl.
+        command = [env_value("ZVEC_PYTHON", sys.executable), str(target), *forwarded]
+    return subprocess.run(command, env=env, check=False).returncode
 
 
 if __name__ == "__main__":
