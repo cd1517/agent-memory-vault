@@ -38,7 +38,9 @@ scripts/
   bootstrap.py           # 从模板创建本地私有 vault
   agent_memory_index.py  # 全库 SQLite 索引和搜索
   agent_memory_search.py # 统一搜索入口：SQLite + 可选 Zvec + 手动 rg
+  agent_memory_safety.py # 写入前来源、知识类型和敏感内容闸门
   agent_memory_claim.py  # 会话文件认领账本，防止 Claude/Codex 串提交
+  agent_memory_intent.py # 受保护文件的写入意图、审批绑定和不可变回执
   agent_memory_closeout.py
                           # 任务结束收尾：检查、对账、刷新索引、审计、可选提交
   agent_memory_audit.py  # 定期体检：过期、重复、open-loop、裁决记录
@@ -53,6 +55,7 @@ scripts/
   memoryctl               # Claude/Codex 共用的平台中立命令入口
   agent_memory_zvec_index.py
   agent_memory_retrieval_benchmark.py
+  agent_memory_decision_outcomes.py
   agent_memory_evolution.py
   agent_memory_check.py
 ```
@@ -99,7 +102,9 @@ cp config/agent-memory.example.toml "$HOME/.config/agent-memory/config/agent-mem
 
 ```bash
 python3 scripts/memoryctl --actor claude search "项目状态" --limit 5
-python3 scripts/memoryctl --actor codex prewrite "准备写入的记忆摘要"
+python3 scripts/memoryctl --actor codex prewrite "准备写入的记忆摘要" \
+  --source-class user_direct --knowledge-kind fact \
+  --asserted-by user --evidence-ref "current-conversation"
 python3 scripts/memoryctl --actor codex claim --file "/absolute/path/to/changed-memory.md"
 python3 scripts/memoryctl --actor claude closeout
 ```
@@ -119,7 +124,12 @@ python3 scripts/memoryctl --actor human claims-expire --older-than-hours 24 --ap
 python3 scripts/agent_memory_search.py "项目 收尾" --limit 5
 python3 scripts/agent_memory_search.py "偏好" --track user
 python3 scripts/agent_memory_search.py "复用流程" --memory-type workflow
+python3 scripts/agent_memory_search.py "部署边界" --current-project example-app
 ```
+
+传入 `--current-project` 后，任何带有非 `global/shared` `project_id` 的记忆都受项目硬边界约束，不论它位于项目、工作流还是决策轨道。确实要借鉴别的项目时，必须再加 `--cross-project`，返回项会标成 `analogy_only`，只能参考，不能据此授权执行动作。没有 `project_id` 的内容按未限定共享参考处理；只有明确写成 `global` 或 `shared` 的内容才是全局共享。
+
+有 `valid_until` 的记忆到期后不会从搜索结果里消失。它仍可能解释历史，但会标成 `time_status: expired` 和 `requires_live_verification: true`；凡是当前状态、费用、账号、权限、外部系统等会变化的事实，都要实时核验后再用。
 
 任务结束时建议使用统一收尾脚本。它会读取当前会话认领账本，同时追踪“上次成功 closeout 观察到的提交”之后的 Git 历史，因此 Obsidian Git 等工具提前自动提交也不会造成漏处理。随后执行结构检查、字面与语义双重对账、SQLite 刷新、可选 Zvec 补漏/清理、Agent evolution 刷新，并在 audit 超过间隔时顺手跑一次体检。全局锁负责串行化，认领账本负责隔离文件归属，两者解决的是不同问题。人工维护全库时可显式使用 `memoryctl ... closeout --global`。
 
@@ -131,8 +141,51 @@ python3 scripts/memoryctl --actor codex closeout
 写入正式记忆前，可以先让脚本做一次对账，判断应该新建、更新旧文件、跳过、还是需要人工合并：
 
 ```bash
-python3 scripts/memoryctl --actor codex prewrite "准备写入的记忆摘要"
+python3 scripts/memoryctl --actor codex prewrite "准备写入的记忆摘要" \
+  --source-class local_verified --knowledge-kind fact \
+  --asserted-by codex --evidence-ref "local-check:example"
 ```
+
+`prewrite` 先过来源与敏感信息闸门，再做查重对账。`--source-class` 说明信息从哪里来，`--knowledge-kind` 说明它是事实、偏好、规则、推断还是假设；`--asserted-by` 记录主张者，`--evidence-ref` 只以哈希进入安全日志。外部不可信内容、Agent 自己推断的权威事实，以及来源不明的内容，不能悄悄升级成正式事实。
+
+相似度的两个数各管一件事：`zvec_raw_distance` 是模型返回的原始距离，只用它做距离阈值和写入对账；`zvec_rank_distance` 是为展示排序加入词面修正后的距离，只决定候选先后。不能拿 rank 值触发 `UPDATE` 或 `MERGE_REQUIRED`。
+
+### 受保护文件的写入意图
+
+高影响文件可以在 TOML 的 `[write_intents]` 中列入 `protected_paths`。`enforcement = "off"` 表示暂不拦截，`"advisory"` 只报告缺少意图，`"enforce"` 则要求先有内容绑定的意图再改文件。升级旧系统时建议从少量精确路径和 `off` 开始，不要一上来保护整个 vault。
+
+标准顺序是“提案在 vault 外 → 创建意图 → 必要时批准 → 先认领再编辑 → closeout 校验并写回执”：
+
+```bash
+python3 scripts/memoryctl --actor codex prewrite "准备更新高影响规则" \
+  --source-class local_verified --knowledge-kind rule \
+  --asserted-by codex --evidence-ref "verified-local-rule" \
+  --create-intent \
+  --target-file "$AGENT_MEMORY_ROOT/工作流/Agent记忆收尾决策规则.md" \
+  --proposal-file "/tmp/agent-memory-proposal.md" --json
+
+# 只有输出要求人工批准时才执行；hash 和批准人必须与该意图绑定
+python3 scripts/memoryctl --actor codex intent approve \
+  --intent-id "<intent-id>" \
+  --target "$AGENT_MEMORY_ROOT/工作流/Agent记忆收尾决策规则.md" \
+  --proposal-raw-sha256 "<proposal-raw-sha256>" \
+  --proposal-canonical-sha256 "<proposal-canonical-sha256>" \
+  --approved-by user \
+  --approval-ref "<current-conversation-approval-ref>" --json
+
+# 必须在编辑目标文件之前认领
+python3 scripts/memoryctl --actor codex claim \
+  --file "$AGENT_MEMORY_ROOT/工作流/Agent记忆收尾决策规则.md" \
+  --intent-id "<intent-id>" --json
+
+python3 scripts/memoryctl --actor codex closeout
+```
+
+closeout 会核对目标、会话、基础版本和提案内容。完全一致记为 `exact`；只差换行或 Unicode 规范化记为 `format_only`；Markdown 行尾两个空格会产生硬换行，因此算实质内容。实质内容不一致默认只输出 diff 哈希和统计并停下，避免把意外写入的秘密打印到终端；仅在人工排查时显式加 `intent validate --show-private-diff` 才显示有界且经过凭证行脱敏的 diff。若 Obsidian Git 等工具提前提交，只要 Git 版本链连续且提交内容正好匹配提案，系统会恢复这次流程并在回执中标记 `early_commit`。成功或失败都会留下只含哈希、状态和边界元数据的不可变回执。私有 state DB 会保存有字节上限的 canonical proposal snapshot；它不进入回执、搜索索引或 closeout 持久日志。Runtime 私有目录固定为 `700`，state DB、sidecar、配置和持久日志固定为 `600`。
+
+这里的 `approved_by` 与 `approval_ref` 是同一台机器、同一 Agent 信任域里的审批见证，不是独立的密码学用户签名。它能防止误复用旧提案，不能阻止已经控制该本地账号的恶意程序伪造“用户已批准”；需要强对抗保证时，必须由宿主 UI 或独立人工通道签发不可伪造的一次性回执。
+
+来源安全对所有写入都是操作规范，但 Runtime 只对 `protected_paths` 强制验证 intent 与 safety audit。普通项目笔记仍依赖 Agent 遵守“先 prewrite、后 claim/closeout”的流程；这是为了避免把整个 vault 拖进高摩擦审批，不应被描述成对恶意本地程序的强制防线。
 
 audit 可以手动运行，也可以由 closeout 捎带触发：
 
@@ -182,6 +235,19 @@ python3 scripts/agent_memory_index.py --init --scan --report
 "$HOME/.config/agent-memory/.venv/bin/python" scripts/agent_memory_retrieval_benchmark.py --limit 5
 ```
 
+公开仓库只放假数据 benchmark。真实 vault 的 benchmark 文件应放在 Git 之外；显式传入私有文件时，默认输出只显示 case id、哈希、长度和名次，不打印查询原文、命中正文或绝对路径。只有在本机人工排查且明确接受暴露时，才使用 `--show-private-details`。
+
+对账与来源安全分别使用独立试卷；公开仓库只带六类对账动作和三类安全结果的假样例：
+
+```bash
+python3 scripts/memoryctl --actor codex policy-benchmark --kind reconcile --json
+python3 scripts/memoryctl --actor codex policy-benchmark --kind safety --json
+
+# 显式传入的文件一律默认当私有数据脱敏输出
+python3 scripts/memoryctl --actor codex policy-benchmark \
+  --benchmark-file "$HOME/.config/agent-memory/benchmarks/reconcile-real-v1.json" --json
+```
+
 ## 设计原则
 
 1. Markdown 是事实源，SQLite 是索引。
@@ -194,6 +260,9 @@ python3 scripts/agent_memory_index.py --init --scan --report
 8. `verified_at` 必须区分真实复核与文件 mtime 回退；不同记忆类型用 `review_after_days` 设置不同复核周期。
 9. 统一搜索会同时合并关键词与语义结果，所有筛选在合并后再次执行，并用距离阈值拒绝“硬凑出来”的无关近邻。
 10. audit 通过机器可读不变量检查当前摘要、核心路径、脚本前缀和 scope；实时计数不要长期手写在摘要里。
+11. 原始相似度只负责写入判断，排序分只负责候选顺序；两者不能混用。
+12. 项目事实默认硬隔离；跨项目内容和过期内容都只能作参考，不能直接授权动作。
+13. 高影响文件可启用写入意图，把“批准了哪一版”绑定到目标、会话、提案哈希和最终回执。
 
 ## 致谢
 

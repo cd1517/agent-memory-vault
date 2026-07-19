@@ -21,13 +21,22 @@ python3 scripts/memoryctl --actor claude search "查询词" --limit 5
 
 它会先查 SQLite/FTS；启用语义索引时，也可以并行查 Zvec。Zvec 命中只能当作候选线索，最终回答前必须回读 Markdown 原文。
 
+`zvec_raw_distance` 是模型原始距离，只用于距离阈值和写入对账；`zvec_rank_distance` 是加过词面修正的排序距离，只决定先看哪个候选，不能触发写入、更新或合并。
+
+在项目任务中传入 `--current-project <project-id>`。任何带有非 `global/shared` `project_id` 的记忆都默认硬隔离，包括工作流和决策；只有显式加 `--cross-project` 才返回其他项目的类比线索，而且这些结果不能授权动作。没有 `project_id` 的内容按未限定共享参考处理。`valid_until` 已过期的内容仍可召回，但必须实时核验。
+
 ## 写入规则
 
 正式写入前先做对账，避免重复记忆越写越多：
 
 ```bash
-python3 scripts/memoryctl --actor <codex|claude> prewrite "准备写入的记忆摘要"
+python3 scripts/memoryctl --actor <codex|claude> prewrite "准备写入的记忆摘要" \
+  --source-class <user_direct|manual_edit|local_verified|external_untrusted|agent_inferred|unknown> \
+  --knowledge-kind <fact|preference|rule|inference|hypothesis> \
+  --asserted-by <bounded-identity> --evidence-ref <evidence-reference>
 ```
+
+安全闸门必须早于检索和对账。外部不可信内容、Agent 推断的权威事实、来源不明内容或疑似凭证，不得直接写成正式事实。安全日志只留哈希、长度和分类，不留候选原文或证据原文。
 
 对账动作只允许这 6 种：
 
@@ -38,11 +47,14 @@ python3 scripts/memoryctl --actor <codex|claude> prewrite "准备写入的记忆
 - `MERGE_REQUIRED`：疑似重复或冲突，需要人工合并。
 - `ASK_USER`：涉及敏感、删除、费用、账号、凭证或不确定判断时先问用户。
 
-每次新建或修改正式记忆后，立即把文件认领到当前 Agent 会话：
+普通文件每次新建或修改后立即认领。列入 `[write_intents].protected_paths` 的高影响文件必须在编辑前完成“提案在 vault 外 → create intent → 必要时 approve → 带 intent id claim”，然后才能编辑：
 
 ```bash
-python3 scripts/memoryctl --actor <codex|claude> claim --file "/absolute/path/to/memory.md"
+python3 scripts/memoryctl --actor <codex|claude> claim \
+  --file "/absolute/path/to/memory.md" --intent-id "<intent-id>"
 ```
+
+`off` 不拦截，`advisory` 只提示，`enforce` 会阻止没有有效意图的受保护改动。批准必须绑定目标、提案哈希、批准人和批准记录；但本地 CLI 记录只是同一 Agent 信任域内的审批见证，不是独立用户签名。内容实质变化时默认只返回 diff 哈希和统计并停止；人工排查才可显式请求经过凭证行脱敏的私密 diff，不能复用旧批准。closeout 会验证最终内容并写不可变 receipt。若文件被其他本地工具提前提交，只有 Git 版本链连续且提交内容与提案一致时，才按 `early_commit` 恢复并完成回执。
 
 Codex 会自动使用 `CODEX_THREAD_ID`；Claude Code 必须通过 `SessionStart` 运行 `agent_memory_session_hook.py --actor claude`，把官方 Hook payload 的真实 `session_id` 写入 `CLAUDE_ENV_FILE`，供后续 Bash 命令使用。Stop Hook 只处理当前会话认领的文件，其他会话的脏文件会明确排除；成功 closeout 会另存文件内容 hash，只有匹配这份完成指纹的历史内容才视为已处理。
 
@@ -55,7 +67,7 @@ python3 scripts/memoryctl --actor <codex|claude> closeout
 
 在 Agent 会话内，`memoryctl closeout` 会按当前会话的认领账本执行结构检查、写入后对账、SQLite 刷新、可选 Zvec 刷新、Agent evolution 刷新、audit 捎带触发、closeout 日志写入，并只提交本会话认领的文件。只有人工维护时才使用 `--global` 做全库收尾。
 
-如果 closeout 输出 `MERGE_REQUIRED`、`ASK_USER`、删除文件状态、疑似历史脏变更，先停下让用户确认。
+如果 closeout 输出 `MERGE_REQUIRED`、`ASK_USER`、写入意图不匹配、删除文件状态或疑似历史脏变更，先停下让用户确认。
 
 普通记忆直接写入正式目录：`用户记忆/`、`项目/`、`工作流/`、`决策/`。Agent 复用经验写入 `agent/cases/` 或 `agent/case-candidates/`。多次复用、可抽象成流程的经验，写入 `agent/skill-candidates/`，正式升级 skill 前需要用户确认。
 
@@ -92,6 +104,7 @@ status: active
 sensitivity: normal
 verified_at: 2026-06-20
 review_after_days: 90
+valid_until: ""
 keywords:
   - example
 ---

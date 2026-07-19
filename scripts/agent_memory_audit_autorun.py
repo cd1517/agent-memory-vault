@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from agent_memory_env import env_value
+from agent_memory_state import (
+    ensure_private_directory,
+    harden_private_file,
+    secure_append_text,
+)
 
 
 SCRIPT_ROOT = Path(__file__).resolve().parent
@@ -138,7 +143,6 @@ def run_command(command: list[str], timeout: int = 180) -> dict[str, Any]:
 
 
 def append_run_log(payload: dict[str, Any]) -> None:
-    RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
     summary = {
         "time": payload.get("time"),
         "reason": payload.get("reason"),
@@ -151,22 +155,25 @@ def append_run_log(payload: dict[str, Any]) -> None:
         "report_path": payload.get("report_path", ""),
         "detail": payload.get("detail", ""),
     }
-    with RUN_LOG.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(summary, ensure_ascii=False, sort_keys=True) + "\n")
+    secure_append_text(RUN_LOG, json.dumps(summary, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def write_report(payload: dict[str, Any]) -> None:
-    LATEST_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(LATEST_REPORT.parent)
     temporary = LATEST_REPORT.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    harden_private_file(temporary)
     os.replace(temporary, LATEST_REPORT)
+    harden_private_file(LATEST_REPORT)
 
 
 def write_doctor_report(payload: dict[str, Any]) -> None:
-    LATEST_DOCTOR_REPORT.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(LATEST_DOCTOR_REPORT.parent)
     temporary = LATEST_DOCTOR_REPORT.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    harden_private_file(temporary)
     os.replace(temporary, LATEST_DOCTOR_REPORT)
+    harden_private_file(LATEST_DOCTOR_REPORT)
 
 
 def notify(title: str, message: str) -> None:

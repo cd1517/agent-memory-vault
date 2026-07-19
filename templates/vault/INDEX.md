@@ -27,6 +27,7 @@ keywords:
 - SQLite 索引：`工作流/Agent记忆SQLite全库索引设计.md`
 - 语义检索：`工作流/Agent记忆语义检索设计.md`
 - Agent 记忆：`agent/README.md`
+- 决策结果复盘：`memoryctl decision-outcomes`
 
 ## 目录职责
 

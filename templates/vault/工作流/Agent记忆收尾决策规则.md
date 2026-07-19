@@ -25,7 +25,12 @@ keywords:
 写入前先运行：
 
 ```bash
-python3 scripts/agent_memory_closeout.py --prewrite "准备写入的记忆摘要"
+python3 scripts/agent_memory_closeout.py \
+  --prewrite "准备写入的记忆摘要" \
+  --source-class user_direct \
+  --knowledge-kind fact \
+  --asserted-by human \
+  --evidence-ref "当前对话或可复核的本地事实"
 ```
 
 根据结果选择：

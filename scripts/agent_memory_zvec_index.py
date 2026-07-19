@@ -19,13 +19,14 @@ from pathlib import Path
 from typing import Any
 
 from agent_memory_env import env_value
+from agent_memory_state import absolute_path, secure_sqlite_connect
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = REPO_ROOT / "scripts"
-STATE_DB = Path(
+STATE_DB = absolute_path(
     os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-).expanduser().resolve()
+)
 DEFAULT_COLLECTION_PATH = Path(
     os.path.expandvars(
         env_value("VECTOR_DIR", "$HOME/.config/agent-memory/zvec/memory_chunks_embeddinggemma_768")
@@ -273,13 +274,15 @@ def build_chunks(sqlite_index: Any, doc: IndexedDoc) -> list[Chunk]:
 
 
 def connect(state_db: Path = STATE_DB) -> sqlite3.Connection:
-    state_db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(state_db)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=10000")
-    return conn
+    return secure_sqlite_connect(
+        state_db,
+        row_factory=sqlite3.Row,
+        pragmas=(
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA foreign_keys=ON",
+            "PRAGMA busy_timeout=10000",
+        ),
+    )
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
@@ -779,7 +782,9 @@ def vector_rows(conn: sqlite3.Connection, scored_ids: list[tuple[str, float]], q
             {
                 "chunk_id": row["chunk_id"],
                 "score": rank_score,
+                "rank_distance": rank_score,
                 "vector_score": vector_score,
+                "raw_distance": vector_score,
                 "path": row["path"],
                 "rel_path": row["rel_path"],
                 "title": row["title"],

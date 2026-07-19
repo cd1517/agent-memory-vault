@@ -18,6 +18,10 @@ SQLite 只负责索引，不负责成为唯一事实源。
 - Markdown：保存正式记忆。
 - SQLite：保存文件索引、搜索字段、未闭环事项和 Agent case 状态。
 - Session claims：在 SQLite 中记录“哪个会话负责哪些 Markdown”，避免两个 Agent 串提交。
+- Source safety：在检索和对账前判断来源、知识类型与敏感内容，只保存哈希和分类。
+- Write intents：对少量高影响路径，把目标、基础版本、提案哈希、批准和会话绑定起来，closeout 后生成不可变回执。
+
+来源安全是所有写入的操作规范，但技术上的 fail-closed 只覆盖配置中的少量高影响路径。普通笔记仍依赖 Agent 先运行 prewrite；这是明确的低摩擦边界，不是恶意本地调用者无法绕过的安全边界。
 - File observations：成功 closeout 后记录文件内容 hash；它证明某一版内容已经完成检查、索引与收尾，不能用全库索引时顺带扫到来冒充。
 - Git：保存修改记录，支持 scoped commit 和回滚。
 - 统一搜索脚本：合并关键词搜索、字段过滤、可选语义召回和手动 rg。
@@ -31,7 +35,7 @@ SQLite 只负责索引，不负责成为唯一事实源。
 
 向量层不替代 SQLite。SQLite 继续负责路径、字段、FTS、open-loop 和正交过滤；Zvec 只负责“意思相近”的候选召回。
 
-统一搜索会并行查询 SQLite/FTS 与 Zvec，合并去重后再统一执行 `track`、`memory_type`、`project_id`、`status` 等筛选。语义距离超过阈值的结果直接丢弃，因此向量库不会为了凑足数量而返回明显无关的记忆。
+统一搜索会并行查询 SQLite/FTS 与 Zvec，合并去重后再统一执行 `track`、`memory_type`、`project_id`、`status` 等筛选。语义距离超过阈值的结果直接丢弃，因此向量库不会为了凑足数量而返回明显无关的记忆。这里严格分开原始距离和排序距离：raw 只负责阈值与写入对账，rank 只负责把候选排得更好看，不能反过来触发写入。
 
 ## 3. Shared core and host adapters
 
@@ -39,7 +43,7 @@ Claude Code 与 Codex 共用 Markdown、Git、SQLite、Zvec、closeout 和 audit
 
 普通事实默认 `agent_scope: shared`，这个字段决定可见范围；`agent_id` 只记录来源。`created_by` 和 `last_updated_by` 记录来源；closeout 日志另外记录 actor、trigger、session hash 和 run id。不要为每个 Agent 建独立 Git 基线或独立向量库。
 
-并发控制分三层：全局文件锁保证 SQLite/Zvec/Git 操作不会同时执行；`memory_session_claims` 保证每次 closeout 只处理当前会话自己的文件；`memory_file_observations` 以内容 hash 证明别的会话已经处理完某一版文件，使共享 Git 基线可以安全前进。三者不能互相替代。
+并发控制和写入授权是两件事。全局文件锁保证 SQLite/Zvec/Git 操作不会同时执行；`memory_session_claims` 保证每次 closeout 只处理当前会话自己的文件；`memory_file_observations` 以内容 hash 记录别的会话已经处理完某一版文件；写入意图记录“本地流程声称批准的是这个目标的这一版内容”。同一 Agent 可调用的 approval CLI 不是独立用户签名；没有宿主 UI 或独立人工通道签发的一次性回执时，它只能防误操作，不能对抗已控制本地账号的恶意程序。这些机制不能互相替代。
 
 ## 4. User memory and Agent memory
 
@@ -77,6 +81,10 @@ status: active
 
 它的价值不是让目录更复杂，而是减少 Agent 每次读取无关内容。
 
+项目边界由 `project_id` 决定，而不是由目录或 `track` 决定。传入当前项目后，只要记忆带有非 `global/shared` 的项目标识，就只在对应项目返回；显式请求跨项目时也只能标为类比线索。没有项目标识的内容是未限定共享参考，只有明确标成 `global` 或 `shared` 才视为全局共享。无论哪条轨道，检索命中本身都不构成执行授权。
+
+时间边界与召回边界也分开。`valid_until` 过期不会抹掉历史，搜索仍可返回它；结果会要求实时核验，避免把“过去正确”误当成“现在仍正确”。
+
 ## 6. Semantic retrieval sidecar
 
 语义检索适合这些问题：
@@ -99,12 +107,14 @@ closeout 是每次任务结束后的自动整理员。它不替 Agent 判断“�
 - 读取当前会话认领的记忆文件，并排除其他会话文件。
 - 检查是否有敏感内容、结构问题或膨胀文件。
 - 对新文件做写入后查重，发现重复时输出 `MERGE_REQUIRED`。
+- 对受保护路径校验写入意图、批准绑定、基础版本和最终提案内容；不匹配时输出 `ASK_USER`。
 - 刷新 SQLite 和可选 Zvec。
 - Zvec 全量扫描会补齐漏项，并清理已删除、重命名或不再合格的旧向量；“已过时信息/旧方案”等历史段落默认不进入当前事实向量。
 - 必要时刷新 Agent evolution。
 - 检查 audit 是否超过间隔，超过则捎带运行。
 - 记录 closeout 日志，并在允许时只提交本轮记忆文件。
 - 日志保存 `git_observed_through` 基线；即使其他备份工具先提交，下一次 closeout 也会从 Git 历史找回尚未处理的记忆变更。
+- 如果其他本地工具提前提交，只有连续 Git 版本链中存在与提案匹配的内容，才记录 `early_commit` 并生成成功回执。
 
 audit 是定期体检。它只产出 findings 和裁决记录，不直接改写 Markdown 事实层。除过期、重复和 open-loop 外，它还读取机器可读不变量，检查当前摘要里的旧路径、退役脚本、错误 scope 和已经漂移的固定计数。
 

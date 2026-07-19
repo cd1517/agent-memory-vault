@@ -35,6 +35,7 @@ session_id: ""
 status: active
 sensitivity: normal
 verified_at: 2026-06-20
+valid_until: ""
 keywords:
   - example
 ---
@@ -53,8 +54,13 @@ keywords:
 - `sensitivity`：`normal`、`private`、`public-template` 等。
 - `verified_at`：最近一次确认日期。
 - `review_after_days`：建议多久后重新核验。常见默认值：候选 30 天、项目 90 天、工作流 180 天、长期偏好/决策 365 天。
+- `valid_until`：明确知道某条内容在哪天后不能直接当当前事实时才填写；过期后仍可检索，但必须实时核验。
 - 索引会额外记录 `verified_at_source`：来自 frontmatter、摘要中的“最近验证”，或仅是文件 mtime 回退。mtime 不能冒充事实已复核。
 - `keywords`：搜索关键词。
+
+`project_id` 是项目事实边界，不以 `track` 或目录名为准。传入 `--current-project` 后，任何带有非 `global/shared` 项目标识的记忆都只在对应项目返回；显式加 `--cross-project` 才返回其他项目的类比线索，而且这些线索不能授权动作。没有 `project_id` 的内容按未限定共享参考处理；只有明确写成 `global` 或 `shared` 才是全局共享。
+
+搜索结果中的 `time_status: expired` 不等于删除。它表示这条内容仍可解释历史，但必须实时核验，不能直接当当前事实使用。
 
 ## 正交过滤
 
