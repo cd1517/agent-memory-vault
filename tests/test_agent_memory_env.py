@@ -55,6 +55,39 @@ class AgentMemoryEnvironmentTests(unittest.TestCase):
                     self.assertEqual(env_value("ZVEC_PYTHON", "python3"), "/configured/vector/python")
         reset_config_cache()
 
+    def test_python_without_tomllib_parses_multiline_protected_paths(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            config = Path(raw_root) / "agent-memory.toml"
+            config.write_text(
+                "[write_intents]\n"
+                "enabled = true\n"
+                'enforcement = "enforce"\n'
+                "protected_paths = [\n"
+                '  "AGENTS.md",\n'
+                '  "用户记忆/偏好与边界.md",\n'
+                "]\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(agent_memory_env, "tomllib", None),
+                mock.patch.dict(
+                    "os.environ",
+                    {"AGENT_MEMORY_CONFIG_FILE": str(config)},
+                    clear=True,
+                ),
+            ):
+                reset_config_cache()
+                section = agent_memory_env.load_config()["write_intents"]
+                self.assertTrue(section["enabled"])
+                self.assertEqual(section["enforcement"], "enforce")
+                self.assertEqual(
+                    section["protected_paths"],
+                    ["AGENTS.md", "用户记忆/偏好与边界.md"],
+                )
+        reset_config_cache()
+
     def test_repo_source_defaults_to_isolated_local_state(self) -> None:
         import tempfile
 

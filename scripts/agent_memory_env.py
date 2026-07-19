@@ -94,7 +94,11 @@ def load_dotenv() -> dict[str, str]:
 def parse_toml_fallback(text: str) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     section: tuple[str, ...] = ()
-    for raw_line in text.splitlines():
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
+        index += 1
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -106,6 +110,18 @@ def parse_toml_fallback(text: str) -> dict[str, Any]:
             continue
         key = key.strip()
         raw_value = raw_value.strip()
+        if raw_value.startswith("[") and not raw_value.rstrip().endswith("]"):
+            # macOS still ships Python versions without tomllib.  Preserve
+            # newlines so Python's literal parser also handles comments and
+            # trailing commas in ordinary TOML string arrays.
+            continuation = [raw_value]
+            while index < len(lines):
+                next_line = lines[index]
+                index += 1
+                continuation.append(next_line)
+                if next_line.strip().endswith("]"):
+                    break
+            raw_value = "\n".join(continuation)
         try:
             value: object = ast.literal_eval(raw_value)
         except (SyntaxError, ValueError):
