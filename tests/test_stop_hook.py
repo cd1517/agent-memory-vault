@@ -129,7 +129,7 @@ class StopHookGitBaselineTests(unittest.TestCase):
             encoding="utf-8",
         )
         digest = hashlib.sha256(self.note.read_bytes()).hexdigest()
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             conn.execute("CREATE TABLE memory_file_observations (path TEXT PRIMARY KEY, sha256 TEXT NOT NULL)")
             conn.execute(
                 "INSERT INTO memory_file_observations(path, sha256) VALUES (?, ?)",

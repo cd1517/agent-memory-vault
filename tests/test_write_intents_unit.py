@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import importlib.util
 import json
@@ -110,11 +111,12 @@ class WriteIntentTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.IntentError, "outside"):
             self.module.canonical_target("../escape.md")
 
-        external = self.root / "external"
-        external.mkdir()
-        (self.vault / "linked").symlink_to(external, target_is_directory=True)
-        with self.assertRaisesRegex(self.module.IntentError, "symlink"):
-            self.module.canonical_target("linked/note.md")
+        if os.name != "nt":
+            external = self.root / "external"
+            external.mkdir()
+            (self.vault / "linked").symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(self.module.IntentError, "symlink"):
+                self.module.canonical_target("linked/note.md")
 
     def test_proposal_must_be_outside_vault_valid_utf8_and_bounded(self) -> None:
         inside = self.vault / "proposal.tmp"
@@ -132,10 +134,11 @@ class WriteIntentTests(unittest.TestCase):
         with self.assertRaisesRegex(self.module.IntentError, "limit"):
             self.module.read_proposal_file(large, max_bytes=10)
 
-        linked = self.root / "linked-proposal"
-        linked.symlink_to(self.proposal)
-        with self.assertRaisesRegex(self.module.IntentError, "symlink"):
-            self.module.read_proposal_file(linked)
+        if os.name != "nt":
+            linked = self.root / "linked-proposal"
+            linked.symlink_to(self.proposal)
+            with self.assertRaisesRegex(self.module.IntentError, "symlink"):
+                self.module.read_proposal_file(linked)
 
     def test_canonicalization_preserves_markdown_hard_break_spaces(self) -> None:
         source = "\ufeffLine one  \r\nLine two\r\n\r\n"
@@ -192,8 +195,9 @@ class WriteIntentTests(unittest.TestCase):
         self.assertNotIn("# Rules", serialized)
         self.assertEqual(intent["safety_decision"], "ALLOW")
         self.assertTrue(intent["safety_audit_id"])
-        self.assertEqual(self.module.STATE_DB.stat().st_mode & 0o777, 0o600)
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        if os.name != "nt":
+            self.assertEqual(self.module.STATE_DB.stat().st_mode & 0o777, 0o600)
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             snapshot, audit_count = conn.execute(
                 "SELECT proposal_canonical_snapshot, "
                 "(SELECT COUNT(*) FROM memory_safety_log) "
@@ -236,7 +240,7 @@ class WriteIntentTests(unittest.TestCase):
                 asserted_by="codex-test",
             )
         self.assertEqual(caught.exception.reason_code, "ACTIVE_TARGET_CONFLICT")
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             tables = {
                 row[0]
                 for row in conn.execute(
@@ -248,7 +252,7 @@ class WriteIntentTests(unittest.TestCase):
 
     def test_expired_abandoned_intent_is_atomically_replaced(self) -> None:
         first = self.create()
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             conn.execute(
                 "UPDATE memory_write_intents SET expires_at=? WHERE intent_id=?",
                 ("2000-01-01T00:00:00+00:00", first["intent_id"]),
@@ -369,7 +373,7 @@ class WriteIntentTests(unittest.TestCase):
         intent = self.create()
         self.bind(intent)
         self.note.write_bytes(self.proposal.read_bytes())
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             before_intent = conn.execute(
                 "SELECT * FROM memory_write_intents WHERE intent_id=?", (intent["intent_id"],)
             ).fetchone()
@@ -383,7 +387,7 @@ class WriteIntentTests(unittest.TestCase):
         )
         self.assertTrue(preview["ok"])
         self.assertFalse(preview["mutated"])
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             after_intent = conn.execute(
                 "SELECT * FROM memory_write_intents WHERE intent_id=?", (intent["intent_id"],)
             ).fetchone()
@@ -396,7 +400,7 @@ class WriteIntentTests(unittest.TestCase):
         intent = self.create(approval_required=True)
         self.approve(intent)
         self.bind(intent)
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             conn.execute(
                 "UPDATE memory_write_intents SET approved_by='different-user' WHERE intent_id=?",
                 (intent["intent_id"],),
@@ -481,7 +485,7 @@ class WriteIntentTests(unittest.TestCase):
                 git_commit=git(self.root, "rev-parse", "HEAD"),
             )
         self.assertEqual(caught.exception.reason_code, "COMMIT_BLOB_MISMATCH")
-        with sqlite3.connect(self.module.STATE_DB) as conn:
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM memory_write_receipts").fetchone()[0], 0)
 
         git(self.root, "add", "Agent记忆/关键/Rules.md")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -338,7 +339,7 @@ class WriteIntentEndToEndTests(unittest.TestCase):
         self.assertEqual(claimed.returncode, 0, claimed.stderr + claimed.stdout)
         target.write_bytes(proposal.read_bytes())
 
-        with sqlite3.connect(f"file:{self.box.state_db}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{self.box.state_db}?mode=ro", uri=True)) as conn, conn:
             schema_before = conn.execute(
                 "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
             ).fetchall()
@@ -367,7 +368,7 @@ class WriteIntentEndToEndTests(unittest.TestCase):
             for path in self.box.runtime.glob("state.sqlite*")
             if path.is_file()
         }
-        with sqlite3.connect(f"file:{self.box.state_db}?mode=ro", uri=True) as conn:
+        with contextlib.closing(sqlite3.connect(f"file:{self.box.state_db}?mode=ro", uri=True)) as conn, conn:
             schema_after = conn.execute(
                 "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
             ).fetchall()
@@ -431,7 +432,7 @@ class WriteIntentEndToEndTests(unittest.TestCase):
         self.assertEqual(len(closeout_payload["write_intent_receipts"]), 1)
 
         head = git(self.box.git_root, "rev-parse", "HEAD")
-        with sqlite3.connect(self.box.state_db) as conn:
+        with contextlib.closing(sqlite3.connect(self.box.state_db)) as conn, conn:
             intent_row = conn.execute(
                 "SELECT status FROM memory_write_intents WHERE intent_id=?", (intent_id,)
             ).fetchone()
@@ -489,7 +490,7 @@ class WriteIntentEndToEndTests(unittest.TestCase):
         self.assertEqual(claimed.returncode, 2, claimed.stderr + claimed.stdout)
         self.assertFalse(payload["ok"])
         self.assertIn("does not match", str(payload["error"]))
-        with sqlite3.connect(self.box.state_db) as conn:
+        with contextlib.closing(sqlite3.connect(self.box.state_db)) as conn, conn:
             count = conn.execute(
                 "SELECT COUNT(*) FROM memory_session_claims WHERE intent_id=?",
                 (str(intent["intent_id"]),),
@@ -663,7 +664,7 @@ class WriteIntentEndToEndTests(unittest.TestCase):
         loser = payloads[returncodes.index(2)]
         self.assertEqual(winner["target_key"], "工作流/concurrent.md")
         self.assertEqual(loser["reason_code"], "ACTIVE_TARGET_CONFLICT")
-        with sqlite3.connect(self.box.state_db) as conn:
+        with contextlib.closing(sqlite3.connect(self.box.state_db)) as conn, conn:
             active = conn.execute(
                 "SELECT COUNT(*) FROM memory_write_intents WHERE target_key=? "
                 "AND status IN ('pending','approved','bound','validated')",
@@ -773,7 +774,7 @@ class WriteIntentEndToEndTests(unittest.TestCase):
         bound_payload = self.box.json_payload(bound)
         self.assertEqual(bound_payload["status"], "bound")
         target.write_bytes(proposal.read_bytes())
-        with sqlite3.connect(self.box.state_db) as conn:
+        with contextlib.closing(sqlite3.connect(self.box.state_db)) as conn, conn:
             self.assertEqual(
                 conn.execute(
                     "SELECT COUNT(*) FROM memory_session_claims WHERE intent_id=?", (intent_id,)

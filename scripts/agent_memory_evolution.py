@@ -10,17 +10,15 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 from agent_memory_state import absolute_path, secure_sqlite_connect
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VAULT_ROOT = REPO_ROOT / "templates" / "vault"
-VAULT_ROOT = Path(os.path.expandvars(env_value("ROOT", str(DEFAULT_VAULT_ROOT)))).expanduser().resolve()
+VAULT_ROOT = expand_path(env_value("ROOT", str(DEFAULT_VAULT_ROOT))).resolve()
 AGENT_ROOT = VAULT_ROOT / "agent"
-STATE_DB = absolute_path(
-    os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-)
+STATE_DB = absolute_path(expand_path(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite")))
 
 CASE_CANDIDATE_DIR = AGENT_ROOT / "case-candidates"
 CASE_DIR = AGENT_ROOT / "cases"

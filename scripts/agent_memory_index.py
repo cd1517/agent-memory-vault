@@ -11,17 +11,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 import agent_memory_intent
 from agent_memory_state import absolute_path, secure_sqlite_connect
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VAULT_ROOT = REPO_ROOT / "templates" / "vault"
-VAULT_ROOT = Path(os.path.expandvars(env_value("ROOT", str(DEFAULT_VAULT_ROOT)))).expanduser().resolve()
-STATE_DB = absolute_path(
-    os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-)
+VAULT_ROOT = expand_path(env_value("ROOT", str(DEFAULT_VAULT_ROOT))).resolve()
+STATE_DB = absolute_path(expand_path(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite")))
 DEFAULT_USER_ID = env_value("USER_ID", "demo-user")
 DEFAULT_AGENT_ID = env_value("AGENT_ID", "shared")
 DEFAULT_APP_ID = env_value("APP_ID", "agent-memory")

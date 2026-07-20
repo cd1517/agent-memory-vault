@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover - Python 3.10 fallback for import-time c
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_HOME = Path.home()
 LOCAL_PATH_DEFAULTS: dict[str, tuple[str, ...]] = {
     "CONFIG_ROOT": (),
     "STATE_DB": ("state.sqlite",),
@@ -53,10 +54,19 @@ CONFIG_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
+def expand_path(value: str) -> Path:
+    """Expand user and environment paths consistently on Unix and Windows."""
+
+    if ("$HOME" in value or "${HOME}" in value) and not os.environ.get("HOME"):
+        home = os.environ.get("USERPROFILE") or str(DEFAULT_HOME)
+        value = value.replace("${HOME}", home).replace("$HOME", home)
+    return Path(os.path.expandvars(value)).expanduser()
+
+
 def config_path() -> Path:
     explicit = os.environ.get("AGENT_MEMORY_CONFIG_FILE", "").strip()
     if explicit:
-        return Path(os.path.expandvars(explicit)).expanduser().resolve()
+        return expand_path(explicit).resolve()
     return RUNTIME_ROOT / "config" / "agent-memory.toml"
 
 
@@ -188,7 +198,7 @@ def local_path_default(name: str) -> str | None:
         or dotenv.get("AGENT_MEMORY_CONFIG_ROOT", "").strip()
     )
     if configured_root:
-        root = Path(os.path.expandvars(configured_root)).expanduser()
+        root = expand_path(configured_root)
     elif (RUNTIME_ROOT / "config" / "runtime-manifest.json").is_file():
         root = RUNTIME_ROOT
     else:

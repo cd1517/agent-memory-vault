@@ -23,21 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from agent_memory_env import env_value, load_config
+from agent_memory_env import env_value, expand_path, load_config
 import agent_memory_safety as memory_safety
 from agent_memory_state import StateSecurityError, secure_sqlite_connect
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
-VAULT_ROOT = Path(
-    os.path.expandvars(env_value("ROOT", str(RUNTIME_ROOT / "templates" / "vault")))
-).expanduser()
-GIT_ROOT = Path(
-    os.path.expandvars(env_value("GIT_ROOT", str(VAULT_ROOT)))
-).expanduser()
-STATE_DB = Path(
-    os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-).expanduser()
+VAULT_ROOT = expand_path(env_value("ROOT", str(RUNTIME_ROOT / "templates" / "vault")))
+GIT_ROOT = expand_path(env_value("GIT_ROOT", str(VAULT_ROOT)))
+STATE_DB = expand_path(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
 
 
 def _configured_write_intents() -> dict[str, Any]:
@@ -594,10 +588,15 @@ def _record_safety_assessment(
 
 
 def _run_git(*args: str, binary: bool = False) -> subprocess.CompletedProcess[Any]:
+    command = ["git", "-C", str(_absolute_lexical(GIT_ROOT)), *args]
+    if binary:
+        return subprocess.run(command, capture_output=True, text=False, timeout=30, check=False)
     return subprocess.run(
-        ["git", "-C", str(_absolute_lexical(GIT_ROOT)), *args],
+        command,
         capture_output=True,
-        text=not binary,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )

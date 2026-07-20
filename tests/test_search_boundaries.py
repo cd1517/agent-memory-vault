@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -283,7 +284,7 @@ class SearchBoundaryTests(unittest.TestCase):
             ]
 
             before_bytes = state_db.read_bytes()
-            with sqlite3.connect(state_db) as before_conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as before_conn, before_conn:
                 before_rows = {
                     table: before_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                     for table in ("memory_docs", "memory_fts", "memory_search_log", "meta")
@@ -342,7 +343,7 @@ class SearchBoundaryTests(unittest.TestCase):
             )
             self.assertNotIn("项目/alpha.md", {row["rel_path"] for row in exact_payload["results"]})
 
-            with sqlite3.connect(state_db) as after_conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as after_conn, after_conn:
                 after_rows = {
                     table: after_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                     for table in ("memory_docs", "memory_fts", "memory_search_log", "meta")
@@ -354,7 +355,7 @@ class SearchBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             state_db = tmp / "legacy.sqlite"
-            with sqlite3.connect(state_db) as conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
                 conn.execute("CREATE TABLE legacy_marker(value TEXT NOT NULL)")
                 conn.execute("INSERT INTO legacy_marker(value) VALUES ('unchanged')")
             config = tmp / "agent-memory.toml"
@@ -384,7 +385,7 @@ class SearchBoundaryTests(unittest.TestCase):
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["results"], [])
             self.assertTrue(any("sqlite search failed" in warning for warning in payload["warnings"]))
-            with sqlite3.connect(state_db) as conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
                 tables = {
                     row[0]
                     for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")

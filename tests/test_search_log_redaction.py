@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -35,7 +36,7 @@ class SearchLogRedactionTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            with sqlite3.connect(state_db) as conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
                 conn.execute(
                     "INSERT INTO memory_search_log(query,result_count,created_at) VALUES (?,?,?)",
                     ("private legacy query", 0, "2026-07-11T00:00:00+00:00"),
@@ -50,7 +51,7 @@ class SearchLogRedactionTest(unittest.TestCase):
             )
             self.assertEqual(redacted.returncode, 0, redacted.stderr)
             self.assertEqual(json.loads(redacted.stdout), {"redacted": 1, "remaining_raw": 0})
-            with sqlite3.connect(state_db) as conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
                 query, digest, length = conn.execute(
                     "SELECT query, query_sha256, query_length FROM memory_search_log"
                 ).fetchone()

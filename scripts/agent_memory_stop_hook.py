@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -12,15 +13,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 from agent_memory_claim import active_claim_rows, all_active_claim_rows
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VAULT_ROOT = Path(os.path.expandvars(env_value("ROOT", str(REPO_ROOT / "templates" / "vault")))).expanduser().resolve()
-CONFIG_ROOT = Path(os.path.expandvars(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory"))).expanduser().resolve()
-STATE_DB = Path(os.path.expandvars(env_value("STATE_DB", str(CONFIG_ROOT / "state.sqlite")))).expanduser().resolve()
-LOG_PATH = Path(os.path.expandvars(env_value("CLOSEOUT_LOG", str(CONFIG_ROOT / "logs" / "closeout.jsonl")))).expanduser().resolve()
+VAULT_ROOT = expand_path(env_value("ROOT", str(REPO_ROOT / "templates" / "vault"))).resolve()
+CONFIG_ROOT = expand_path(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory")).resolve()
+STATE_DB = expand_path(env_value("STATE_DB", str(CONFIG_ROOT / "state.sqlite"))).resolve()
+LOG_PATH = expand_path(env_value("CLOSEOUT_LOG", str(CONFIG_ROOT / "logs" / "closeout.jsonl"))).resolve()
 CLOSEOUT_SCRIPT = REPO_ROOT / "scripts" / "agent_memory_closeout.py"
 AUDIT_AUTORUN = REPO_ROOT / "scripts" / "agent_memory_audit_autorun.py"
 STAMP_ROOT = CONFIG_ROOT / "hooks"
@@ -33,7 +34,7 @@ def default_git_root() -> Path:
     return VAULT_ROOT.parent.resolve()
 
 
-GIT_ROOT = Path(os.path.expandvars(env_value("GIT_ROOT", str(default_git_root())))).expanduser().resolve()
+GIT_ROOT = expand_path(env_value("GIT_ROOT", str(default_git_root()))).resolve()
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,12 +55,15 @@ def read_payload() -> dict[str, object]:
 
 
 def clean_env() -> dict[str, str]:
-    return {
+    env = {
         key: value
         for key, value in os.environ.items()
         if not any(token in key.upper() for token in ("KEY", "TOKEN", "SECRET", "PASSWORD", "COOKIE", "CREDENTIAL"))
         and "PROXY" not in key.upper()
     }
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
 
 
 def session_key(payload: dict[str, object], actor: str) -> str:
@@ -83,6 +87,8 @@ def run_git(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess[st
         return subprocess.run(
             ["git", "-C", str(GIT_ROOT), "-c", "core.quotepath=false", *args],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout,
             check=False,
@@ -167,7 +173,7 @@ def unobserved_paths(paths: list[Path]) -> list[Path]:
     if not paths or not STATE_DB.exists():
         return paths
     try:
-        with sqlite3.connect(STATE_DB, timeout=5) as conn:
+        with contextlib.closing(sqlite3.connect(STATE_DB, timeout=5)) as conn:
             conn.execute("PRAGMA busy_timeout=5000")
             rows = conn.execute("SELECT path, sha256 FROM memory_file_observations").fetchall()
     except (OSError, sqlite3.Error):
@@ -213,7 +219,16 @@ def run_closeout(payload: dict[str, object], actor: str, timeout: int) -> dict[s
         "60",
     ]
     try:
-        completed = subprocess.run(command, text=True, capture_output=True, timeout=max(timeout, 30), env=clean_env(), check=False)
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=max(timeout, 30),
+            env=clean_env(),
+            check=False,
+        )
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": f"closeout timed out after {timeout}s"}
     except OSError as exc:
@@ -259,6 +274,8 @@ def run_due_audit() -> None:
         subprocess.run(
             [sys.executable, str(AUDIT_AUTORUN), "--reason", "hook", "--min-interval-days", "7", "--notify", "--json"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=180,
             env=clean_env(),

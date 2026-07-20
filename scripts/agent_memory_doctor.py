@@ -2,31 +2,35 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from agent_memory_env import env_value, load_config
+from agent_memory_env import env_value, expand_path, load_config
 from agent_memory_state import absolute_path, secure_sqlite_connect, sqlite_permission_report
 
 
 VERSION = "2.2"
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VAULT_ROOT = Path(os.path.expandvars(env_value("ROOT", str(REPO_ROOT / "templates" / "vault")))).expanduser().resolve()
-GIT_ROOT = Path(os.path.expandvars(env_value("GIT_ROOT", str(REPO_ROOT)))).expanduser().resolve()
-CONFIG_ROOT = Path(os.path.expandvars(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory"))).expanduser().resolve()
-STATE_DB = absolute_path(os.path.expandvars(env_value("STATE_DB", str(CONFIG_ROOT / "state.sqlite"))))
+VAULT_ROOT = expand_path(env_value("ROOT", str(REPO_ROOT / "templates" / "vault"))).resolve()
+GIT_ROOT = expand_path(env_value("GIT_ROOT", str(REPO_ROOT))).resolve()
+CONFIG_ROOT = expand_path(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory")).resolve()
+STATE_DB = absolute_path(expand_path(env_value("STATE_DB", str(CONFIG_ROOT / "state.sqlite"))))
 SCRIPT_ROOT = REPO_ROOT / "scripts"
-AUDIT_LOG = Path(os.path.expandvars(env_value("AUDIT_RUN_LOG", str(CONFIG_ROOT / "logs" / "audit_runs.jsonl")))).expanduser().resolve()
-CLOSEOUT_LOG = Path(os.path.expandvars(env_value("CLOSEOUT_LOG", str(CONFIG_ROOT / "logs" / "closeout.jsonl")))).expanduser().resolve()
+PYTHON = expand_path(env_value("PYTHON", sys.executable))
+AUDIT_LOG = expand_path(env_value("AUDIT_RUN_LOG", str(CONFIG_ROOT / "logs" / "audit_runs.jsonl"))).resolve()
+CLOSEOUT_LOG = expand_path(env_value("CLOSEOUT_LOG", str(CONFIG_ROOT / "logs" / "closeout.jsonl"))).resolve()
 RUNTIME_MANIFEST = CONFIG_ROOT / "config" / "runtime-manifest.json"
 HOST_CONFIG = load_config().get("host", {})
 if not isinstance(HOST_CONFIG, dict):
@@ -35,13 +39,11 @@ SEMANTIC_CONFIG = load_config().get("semantic_retrieval", {})
 if not isinstance(SEMANTIC_CONFIG, dict):
     SEMANTIC_CONFIG = {}
 SEMANTIC_ENABLED = bool(SEMANTIC_CONFIG.get("enabled", False))
-ZVEC_PYTHON = Path(
-    os.path.expandvars(env_value("ZVEC_PYTHON", str(CONFIG_ROOT / ".venv" / "bin" / "python")))
-).expanduser()
-EMBEDDING_MODEL = Path(os.path.expandvars(env_value("EMBEDDING_MODEL", ""))).expanduser()
-MODEL_MANIFEST = Path(os.path.expandvars(env_value("MODEL_MANIFEST", str(CONFIG_ROOT / "models" / "embeddinggemma-300m" / "model-manifest.json")))).expanduser().resolve()
+ZVEC_PYTHON = expand_path(env_value("ZVEC_PYTHON", str(CONFIG_ROOT / ".venv" / "bin" / "python")))
+EMBEDDING_MODEL = expand_path(env_value("EMBEDDING_MODEL", ""))
+MODEL_MANIFEST = expand_path(env_value("MODEL_MANIFEST", str(CONFIG_ROOT / "models" / "embeddinggemma-300m" / "model-manifest.json"))).resolve()
 MODEL_REVISION = env_value("MODEL_REVISION", "")
-DEPENDENCY_LOCK = Path(os.path.expandvars(env_value("DEPENDENCY_LOCK", str(CONFIG_ROOT / "requirements-vector.lock")))).expanduser().resolve()
+DEPENDENCY_LOCK = expand_path(env_value("DEPENDENCY_LOCK", str(CONFIG_ROOT / "requirements-vector.lock"))).resolve()
 REQUIRE_LOCAL_MODEL = env_value("REQUIRE_LOCAL_MODEL", "false").strip().lower() in {"1", "true", "yes", "on"}
 EXCLUDED_VECTOR_TYPES = {"routing", "directory_index", "template", "agent_case_candidate", "skill_candidate"}
 EXCLUDED_VECTOR_STATUS = {"archived", "deleted", "obsolete", "outdated", "deprecated", "stale"}
@@ -55,8 +57,20 @@ def utc_now() -> str:
 
 
 def run(command: list[str], timeout: int = 300, env: dict[str, str] | None = None) -> dict[str, Any]:
+    command_env = os.environ.copy() if env is None else env.copy()
+    command_env.setdefault("PYTHONIOENCODING", "utf-8")
+    command_env.setdefault("PYTHONUTF8", "1")
     try:
-        completed = subprocess.run(command, text=True, capture_output=True, timeout=timeout, env=env, check=False)
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=timeout,
+            env=command_env,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "returncode": 127, "detail": type(exc).__name__}
     return {"ok": completed.returncode == 0, "returncode": completed.returncode, "stdout": completed.stdout, "detail": (completed.stderr or completed.stdout).strip()[:500]}
@@ -249,7 +263,7 @@ def configured_path(name: str) -> Path | None:
     raw = HOST_CONFIG.get(name)
     if not isinstance(raw, str) or not raw.strip():
         return None
-    return Path(os.path.expandvars(raw)).expanduser().resolve()
+    return expand_path(raw).resolve()
 
 
 def local_endpoint_reachable(raw_url: str) -> tuple[bool, dict[str, Any]]:
@@ -269,11 +283,10 @@ def cc_switch_hooks_match(db_path: Path, expected_hooks: dict[str, Any]) -> tupl
     if not db_path.exists():
         return True, {"installed": False}
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
-        conn.execute("PRAGMA busy_timeout=5000")
-        common = conn.execute("SELECT value FROM settings WHERE key = 'common_config_claude'").fetchone()
-        backups = conn.execute("SELECT original_config FROM proxy_live_backup WHERE app_type = 'claude'").fetchall()
-        conn.close()
+        with contextlib.closing(sqlite3.connect(db_path, timeout=5)) as conn:
+            conn.execute("PRAGMA busy_timeout=5000")
+            common = conn.execute("SELECT value FROM settings WHERE key = 'common_config_claude'").fetchone()
+            backups = conn.execute("SELECT original_config FROM proxy_live_backup WHERE app_type = 'claude'").fetchall()
         common_payload = json.loads(str(common[0])) if common else {}
         backup_payloads = [json.loads(str(row[0])) for row in backups]
     except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -438,7 +451,7 @@ def eligible_vector(row: sqlite3.Row) -> bool:
 
 def repair_derived() -> list[dict[str, Any]]:
     actions = []
-    index_result = run([str(SCRIPT_ROOT / "agent_memory_index.py"), "--init", "--scan", "--report"], 180)
+    index_result = run([str(PYTHON), str(SCRIPT_ROOT / "agent_memory_index.py"), "--init", "--scan", "--report"], 180)
     actions.append({"action": "rebuild_sqlite_fts", "ok": index_result["ok"], "detail": index_result["detail"]})
     if index_result["ok"] and SEMANTIC_ENABLED:
         vector_result = run(
@@ -455,6 +468,7 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
     required = [
         "agent_memory_index.py",
         "agent_memory_intent.py",
+        "agent_memory_lock.py",
         "agent_memory_search.py",
         "agent_memory_safety.py",
         "agent_memory_closeout.py",
@@ -474,6 +488,24 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
     ]
     missing = [name for name in required if not (SCRIPT_ROOT / name).is_file()]
     add(checks, "runtime_files", "fail" if missing else "pass", "Runtime files complete." if not missing else "Runtime files missing.", {"missing": missing})
+    if os.name == "nt":
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        add(
+            checks,
+            "windows_powershell",
+            "pass" if powershell else "fail",
+            "PowerShell is available." if powershell else "PowerShell was not found.",
+        )
+        hooks_path = Path.home() / ".codex" / "hooks.json"
+        hooks_text = hooks_path.read_text(encoding="utf-8-sig", errors="replace") if hooks_path.is_file() else ""
+        hook_ok = "stop-hook.ps1" in hooks_text or "agent_memory_stop_hook.py" in hooks_text
+        add(
+            checks,
+            "codex_stop_hook",
+            "pass" if hook_ok else "warn",
+            "Codex Stop Hook is configured." if hook_ok else "Codex Stop Hook is not installed.",
+            {"path": str(hooks_path)},
+        )
     if REPO_ROOT.resolve() == CONFIG_ROOT.resolve():
         manifest = read_json_object(RUNTIME_MANIFEST)
         expected = manifest.get("files") if isinstance(manifest, dict) else None
@@ -481,6 +513,8 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
         manifest_mismatch: list[str] = []
         support_missing: list[str] = []
         support_mismatch: list[str] = []
+        template_missing: list[str] = []
+        template_mismatch: list[str] = []
         if isinstance(expected, dict):
             for name, digest in expected.items():
                 path = SCRIPT_ROOT / str(name)
@@ -496,12 +530,22 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
                     support_missing.append(str(name))
                 elif file_sha256(path) != str(digest):
                     support_mismatch.append(str(name))
+        template_expected = manifest.get("template_files", {}) if isinstance(manifest, dict) else {}
+        if isinstance(template_expected, dict):
+            for name, digest in template_expected.items():
+                path = CONFIG_ROOT / str(name)
+                if not path.is_file():
+                    template_missing.append(str(name))
+                elif file_sha256(path) != str(digest):
+                    template_mismatch.append(str(name))
         manifest_ok = (
             isinstance(expected, dict)
             and not manifest_missing
             and not manifest_mismatch
             and not support_missing
             and not support_mismatch
+            and not template_missing
+            and not template_mismatch
         )
         add(
             checks,
@@ -515,6 +559,8 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
                 "mismatched": manifest_mismatch,
                 "support_missing": support_missing,
                 "support_mismatched": support_mismatch,
+                "template_missing": template_missing,
+                "template_mismatched": template_mismatch,
             },
         )
     if not STATE_DB.exists() and not STATE_DB.is_symlink():

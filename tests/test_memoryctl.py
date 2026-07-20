@@ -27,6 +27,20 @@ def load_memoryctl():
 
 
 class MemoryctlInterpreterTests(unittest.TestCase):
+    def test_core_command_uses_current_python(self) -> None:
+        module = load_memoryctl()
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.object(sys, "argv", ["memoryctl", "--actor", "human", "doctor", "--json"]),
+            mock.patch.object(module.subprocess, "run", return_value=completed) as invoked,
+        ):
+            self.assertEqual(module.main(), 0)
+
+        command = invoked.call_args.args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertTrue(str(command[1]).endswith("agent_memory_doctor.py"))
+        self.assertEqual(command[2:], ["--json"])
+
     def test_zvec_uses_configured_semantic_python(self) -> None:
         module = load_memoryctl()
         completed = subprocess.CompletedProcess([], 0)

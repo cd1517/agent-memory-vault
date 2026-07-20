@@ -4,7 +4,7 @@ Agent Memory Vault can run without background automation. The recommended automa
 
 1. `closeout` piggyback: every important task-end closeout checks whether audit is due.
 2. Optional Stop hook: shared Claude/Codex setups run full closeout only for files claimed by the current session.
-3. Optional macOS `launchd` fallback: runs the due content audit plus a read-only infrastructure Doctor weekly even if no Agent session happens.
+3. Optional weekly fallback: macOS uses `launchd`; Windows uses Task Scheduler. Both run the due content audit plus a read-only infrastructure Doctor even if no Agent session happens.
 
 Automation should only produce reminders, reports, logs, and local audit decisions. It should not directly rewrite Markdown facts.
 
@@ -237,6 +237,18 @@ Unload it:
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.example.agent-memory-vault-audit.plist
 ```
+
+## Windows Task Scheduler Fallback
+
+The Windows Runtime includes a PowerShell management wrapper. It registers a weekly task for the current interactive user with Limited privileges:
+
+```powershell
+$runtime = Join-Path $env:LOCALAPPDATA 'AgentMemoryVault'
+& (Join-Path $runtime 'scripts\audit-task.ps1') install -RuntimeRoot $runtime
+& (Join-Path $runtime 'scripts\audit-task.ps1') status -RuntimeRoot $runtime
+```
+
+The task starts the installed Python with UTF-8 mode and runs `agent_memory_audit_autorun.py`. Repeating `install` updates the same task. See [windows.md](windows.md) for the complete setup and removal boundary.
 
 ## Reading Results
 

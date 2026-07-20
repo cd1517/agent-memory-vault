@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,7 @@ class CurrentFactInvariantTest(unittest.TestCase):
             tmp = Path(raw_tmp)
             vault = tmp / "vault"
             runtime = tmp / "runtime"
-            subprocess.run(["cp", "-R", str(TEMPLATE), str(vault)], check=True)
+            shutil.copytree(TEMPLATE, vault)
             runtime.joinpath("config").mkdir(parents=True)
             invariants = runtime / "config" / "system-invariants.json"
             invariants.write_text(

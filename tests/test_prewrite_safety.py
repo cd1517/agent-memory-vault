@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sys
 import sqlite3
 import tempfile
@@ -256,7 +257,7 @@ class SourceSafetyTests(unittest.TestCase):
             state_db = Path(raw_tmp) / "state.sqlite"
             with mock.patch.object(closeout, "STATE_DB", state_db), mock.patch.object(closeout, "search_memory") as search_mock:
                 payload = closeout.run_prewrite(args)
-            with sqlite3.connect(state_db) as conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
                 stored = " ".join(str(value) for value in conn.execute("SELECT * FROM memory_safety_log").fetchone())
         search_mock.assert_not_called()
         self.assertEqual(payload["status"], "blocked")

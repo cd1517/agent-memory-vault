@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -68,7 +69,7 @@ class AgentScopeTests(unittest.TestCase):
             )
             self.assertEqual(indexed.returncode, 0, indexed.stdout + indexed.stderr)
 
-            with sqlite3.connect(state_db) as conn:
+            with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
                 row = conn.execute(
                     "SELECT agent_id, agent_scope FROM memory_docs WHERE rel_path='工作流/shared.md'"
                 ).fetchone()

@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 from agent_memory_safety import SECRET_PATTERNS, normalize_for_detection
 from agent_memory_state import secure_sqlite_connect
 
@@ -18,11 +18,9 @@ from agent_memory_state import secure_sqlite_connect
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = REPO_ROOT / "scripts"
 DEFAULT_VAULT_ROOT = REPO_ROOT / "templates" / "vault"
-VAULT_ROOT = Path(os.path.expandvars(env_value("ROOT", str(DEFAULT_VAULT_ROOT)))).expanduser().resolve()
-GIT_ROOT = Path(os.path.expandvars(env_value("GIT_ROOT", str(REPO_ROOT)))).expanduser().resolve()
-STATE_DB = Path(
-    os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-).expanduser().resolve()
+VAULT_ROOT = expand_path(env_value("ROOT", str(DEFAULT_VAULT_ROOT))).resolve()
+GIT_ROOT = expand_path(env_value("GIT_ROOT", str(REPO_ROOT))).resolve()
+STATE_DB = expand_path(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite")).resolve()
 PUBLIC_TEMPLATE_MODE = DEFAULT_VAULT_ROOT.is_dir() and VAULT_ROOT == DEFAULT_VAULT_ROOT.resolve()
 
 
@@ -281,6 +279,8 @@ def git_remote_has_embedded_credential() -> tuple[bool, str]:
         completed = subprocess.run(
             ["git", "-C", str(GIT_ROOT), "config", "--get-regexp", r"^remote\..*\.url$"],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=15,
             check=False,

@@ -11,7 +11,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import agent_memory_env
-from agent_memory_env import env_value, reset_config_cache
+from agent_memory_env import env_value, expand_path, reset_config_cache
 
 
 class AgentMemoryEnvironmentTests(unittest.TestCase):
@@ -33,6 +33,17 @@ class AgentMemoryEnvironmentTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             reset_config_cache()
             self.assertEqual(env_value("ROOT", "/default"), "/default")
+
+    def test_home_path_falls_back_to_userprofile(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {"USERPROFILE": "C:/profile"},
+            clear=True,
+        ):
+            self.assertEqual(
+                expand_path("$HOME/.config/agent-memory"),
+                Path("C:/profile/.config/agent-memory"),
+            )
 
     def test_runtime_toml_is_used_when_environment_is_absent(self) -> None:
         with self.subTest("toml"):
@@ -120,7 +131,7 @@ class AgentMemoryEnvironmentTests(unittest.TestCase):
                 self.assertEqual(env_value("ROOT", "/default"), "/dotenv/vault")
                 self.assertEqual(
                     env_value("STATE_DB", "/default/state.sqlite"),
-                    "$HOME/.config/dotenv-memory/state.sqlite",
+                    str(Path.home() / ".config" / "dotenv-memory" / "state.sqlite"),
                 )
         reset_config_cache()
 

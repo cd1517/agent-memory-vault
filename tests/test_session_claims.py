@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -54,7 +56,7 @@ class SessionClaimConcurrencyTest(unittest.TestCase):
             vault = git_root / "AgentMemory"
             runtime = tmp / "runtime"
             git_root.mkdir(parents=True)
-            subprocess.run(["cp", "-R", str(TEMPLATE), str(vault)], check=True)
+            shutil.copytree(TEMPLATE, vault)
             subprocess.run(["git", "init", "-q", str(git_root)], check=True)
             subprocess.run(["git", "-C", str(git_root), "config", "user.name", "Agent Memory Test"], check=True)
             subprocess.run(["git", "-C", str(git_root), "config", "user.email", "test@example.invalid"], check=True)
@@ -220,7 +222,7 @@ class SessionClaimConcurrencyTest(unittest.TestCase):
                 {"AgentMemory/项目/_模板-项目.md", "AgentMemory/工作流/Agent记忆收尾决策规则.md"},
             )
 
-            with sqlite3.connect(runtime / "state.sqlite") as conn:
+            with contextlib.closing(sqlite3.connect(runtime / "state.sqlite")) as conn, conn:
                 active = conn.execute(
                     "SELECT COUNT(*) FROM memory_session_claims WHERE status='active'"
                 ).fetchone()[0]

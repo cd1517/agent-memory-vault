@@ -9,13 +9,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
-VAULT_ROOT = Path(
-    os.path.expandvars(env_value("ROOT", str(RUNTIME_ROOT / "templates" / "vault")))
-).expanduser().resolve()
+VAULT_ROOT = expand_path(env_value("ROOT", str(RUNTIME_ROOT / "templates" / "vault"))).resolve()
 SCAN_DIRECTORIES = ("决策", "项目")
 SECTION_PATTERN = re.compile(r"^##\s+决策\s*[-—–]\s*结果记录\s*$")
 FIELD_PATTERN = re.compile(r"^\s*[-*]\s*([^:：]+)[:：]\s*(.*?)\s*$")

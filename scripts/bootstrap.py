@@ -4,15 +4,15 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+from agent_memory_env import expand_path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_ROOT = REPO_ROOT / "templates" / "vault"
-
-
-def expand_path(raw: str) -> Path:
-    return Path(os.path.expandvars(raw)).expanduser().resolve()
 
 
 def replacements(args: argparse.Namespace) -> dict[str, str]:
@@ -20,7 +20,7 @@ def replacements(args: argparse.Namespace) -> dict[str, str]:
         "{{USER_ID}}": args.user_id,
         "{{AGENT_ID}}": args.agent_id,
         "{{APP_ID}}": args.app_id,
-        "{{STATE_DB}}": str(expand_path(args.state_db)),
+        "{{STATE_DB}}": str(expand_path(args.state_db).resolve()),
     }
 
 
@@ -57,14 +57,14 @@ def write_env(args: argparse.Namespace, memory_root: Path) -> None:
     if env_path.exists() and not args.overwrite_env:
         print(f"SKIP env_exists {env_path}")
         return
-    config_root = expand_path(args.config_root)
-    git_root = expand_path(args.git_root) if args.git_root else memory_root
+    config_root = expand_path(args.config_root).resolve()
+    git_root = expand_path(args.git_root).resolve() if args.git_root else memory_root
     content = "\n".join(
         [
             f"AGENT_MEMORY_ROOT={memory_root}",
             f"AGENT_MEMORY_GIT_ROOT={git_root}",
             f"AGENT_MEMORY_CONFIG_ROOT={config_root}",
-            f"AGENT_MEMORY_STATE_DB={expand_path(args.state_db)}",
+            f"AGENT_MEMORY_STATE_DB={expand_path(args.state_db).resolve()}",
             f"AGENT_MEMORY_USER_ID={args.user_id}",
             f"AGENT_MEMORY_AGENT_ID={args.agent_id}",
             f"AGENT_MEMORY_APP_ID={args.app_id}",
@@ -77,6 +77,56 @@ def write_env(args: argparse.Namespace, memory_root: Path) -> None:
     )
     env_path.write_text(content, encoding="utf-8")
     print(f"OK wrote_env {env_path}")
+
+
+def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def initialize_git_baseline(memory_root: Path, git_root: Path) -> dict[str, str]:
+    """Create a clean first Git baseline without staging unrelated parent files."""
+
+    if git_root != memory_root:
+        return {"status": "skipped", "detail": "external_git_root"}
+    if shutil.which("git") is None:
+        return {"status": "error", "detail": "git_not_found"}
+    if not (git_root / ".git").exists():
+        initialized = run_git(git_root, "init", "-q")
+        if initialized.returncode != 0:
+            return {"status": "error", "detail": initialized.stderr.strip() or "git_init_failed"}
+    head = run_git(git_root, "rev-parse", "--verify", "HEAD")
+    if head.returncode == 0:
+        return {"status": "existing", "detail": head.stdout.strip()}
+
+    template_paths = [
+        source.relative_to(TEMPLATE_ROOT).as_posix()
+        for source in sorted(TEMPLATE_ROOT.rglob("*"))
+        if source.is_file() and (memory_root / source.relative_to(TEMPLATE_ROOT)).is_file()
+    ]
+    staged = run_git(git_root, "add", "--", *template_paths)
+    if staged.returncode != 0:
+        return {"status": "error", "detail": staged.stderr.strip() or "git_add_failed"}
+    commit = run_git(
+        git_root,
+        "-c",
+        "user.name=Agent Memory Vault",
+        "-c",
+        "user.email=agent-memory@localhost",
+        "commit",
+        "-qm",
+        "Initialize Agent Memory Vault",
+    )
+    if commit.returncode != 0:
+        return {"status": "error", "detail": commit.stderr.strip() or "git_commit_failed"}
+    return {"status": "created", "detail": run_git(git_root, "rev-parse", "HEAD").stdout.strip()}
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +157,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--write-env", action="store_true", help="Write a local .env file in this repo.")
     parser.add_argument("--overwrite-env", action="store_true", help="Overwrite an existing local .env file.")
+    git_group = parser.add_mutually_exclusive_group()
+    git_group.add_argument("--init-git", dest="init_git", action="store_true", help="Create an initial Git baseline (default).")
+    git_group.add_argument("--no-init-git", dest="init_git", action="store_false", help="Do not initialize Git.")
+    parser.set_defaults(init_git=True)
     return parser.parse_args()
 
 
@@ -115,7 +169,7 @@ def main() -> int:
     if not TEMPLATE_ROOT.is_dir():
         raise SystemExit(f"Template root not found: {TEMPLATE_ROOT}")
 
-    memory_root = expand_path(args.memory_root)
+    memory_root = expand_path(args.memory_root).resolve()
     memory_root.mkdir(parents=True, exist_ok=True)
     created, skipped = copy_template(memory_root, replacements(args), args.overwrite)
     print(f"memory_root={memory_root}")
@@ -125,17 +179,25 @@ def main() -> int:
     if args.write_env:
         write_env(args, memory_root)
 
+    git_root = expand_path(args.git_root).resolve() if args.git_root else memory_root
+    git_baseline = initialize_git_baseline(memory_root, git_root) if args.init_git else {"status": "skipped", "detail": "disabled"}
+    print(f"git_baseline={git_baseline['status']} {git_baseline['detail']}")
+    if git_baseline["status"] == "error":
+        return 2
+
     print("next_commands:")
-    print("  source .env")
-    print("  git -C \"$AGENT_MEMORY_GIT_ROOT\" init  # optional, if the vault is not already in a git repo")
-    print("  python3 scripts/agent_memory_evolution.py --init --scan --report")
-    print("  python3 scripts/agent_memory_index.py --init --scan --report")
-    print("  python3 scripts/agent_memory_closeout.py --dry-run")
-    print("  python3 scripts/agent_memory_check.py")
-    print("  python3 scripts/agent_memory_doctor.py")
+    if os.name == "nt":
+        print("  # Runtime TOML/.env is loaded by Python; no PowerShell import is required")
+    else:
+        print("  source .env")
+    print(f"  {sys.executable} scripts/agent_memory_evolution.py --init --scan --report")
+    print(f"  {sys.executable} scripts/agent_memory_index.py --init --scan --report")
+    print(f"  {sys.executable} scripts/agent_memory_closeout.py --dry-run")
+    print(f"  {sys.executable} scripts/agent_memory_check.py")
+    print(f"  {sys.executable} scripts/agent_memory_doctor.py")
     print("optional_semantic_retrieval:")
-    print("  python3 -m pip install -r requirements-vector.lock")
-    print("  python3 scripts/agent_memory_zvec_index.py --init --scan --prune")
+    print(f"  {sys.executable} -m pip install -r requirements-vector.lock")
+    print(f"  {sys.executable} scripts/agent_memory_zvec_index.py --init --scan --prune")
     return 0
 
 

@@ -81,6 +81,15 @@ python3 scripts/agent_memory_check.py
 python3 scripts/agent_memory_doctor.py
 ```
 
+`bootstrap.py` 默认初始化独立 Git 仓库并提交一份仅含模板文件的首个基线；如已有 `HEAD` 会保持不动。只有明确不需要 Git 时才加 `--no-init-git`。模板自带 `.gitignore`，会排除 Obsidian 的 `.obsidian/` 界面状态。
+
+Windows 10/11 请直接使用 PowerShell 安装器，完整步骤见 [docs/windows.md](docs/windows.md)：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 `
+  -MemoryRoot "$HOME\Documents\Agent Memory Vault"
+```
+
 需要让多个 Agent 从固定本机入口调用时，可把 GitHub 仓库作为唯一源码安装到 Runtime；升级时重复运行同一命令即可，私人 TOML 和本机适配器不会被覆盖：
 
 ```bash
@@ -205,7 +214,7 @@ python3 scripts/agent_memory_doctor.py --repair-derived  # 只重建派生索引
 
 Doctor 还会检查语义检索虚拟环境的基础 Python 是否仍存在、会话认领是否卡死，以及记忆 Git 提交是否长期没有推送。默认容忍少量刚生成的本地提交；记忆提交累计到 10 个，或最老一条超过 3 天仍未推送时才报警，避免日常噪声。
 
-可选的 Stop hook 与 macOS `launchd` 周期兜底见 [docs/automation.md](docs/automation.md)。
+可选的 Stop Hook、macOS `launchd` 与 Windows Task Scheduler 周期兜底见 [docs/automation.md](docs/automation.md)。Windows 兼容边界见 [docs/windows-compatibility-audit.md](docs/windows-compatibility-audit.md)。
 
 ## 可选：语义检索
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import contextlib
 import os
 import sqlite3
 import stat
@@ -29,6 +30,7 @@ def mode(path: Path) -> int:
 
 
 class StatePermissionTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX file modes and symlinks are not the Windows security model")
     def test_secure_append_creates_private_log_and_rejects_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
@@ -58,30 +60,34 @@ class StatePermissionTests(unittest.TestCase):
             connection.execute("INSERT INTO sample VALUES ('ok')")
             connection.commit()
 
-            self.assertEqual(mode(root / "new"), 0o700)
-            self.assertEqual(mode(root / "new" / "nested"), 0o700)
-            self.assertEqual(mode(database), 0o600)
+            if os.name != "nt":
+                self.assertEqual(mode(root / "new"), 0o700)
+                self.assertEqual(mode(root / "new" / "nested"), 0o700)
+                self.assertEqual(mode(database), 0o600)
             for suffix in ("-wal", "-shm"):
                 sidecar = Path(f"{database}{suffix}")
                 self.assertTrue(sidecar.is_file())
-                self.assertEqual(mode(sidecar), 0o600)
+                if os.name != "nt":
+                    self.assertEqual(mode(sidecar), 0o600)
             connection.close()
 
+    @unittest.skipIf(os.name == "nt", "symlink behavior requires explicit Windows privileges")
     def test_secure_connect_rejects_database_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
             target = root / "target.sqlite"
-            with sqlite3.connect(target) as connection:
+            with contextlib.closing(sqlite3.connect(target)) as connection, connection:
                 connection.execute("CREATE TABLE sample(value TEXT)")
             link = root / "state.sqlite"
             link.symlink_to(target)
             with self.assertRaises(StateSecurityError):
                 secure_sqlite_connect(link)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift is not meaningful on Windows")
     def test_normal_connect_repairs_existing_mode_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             database = Path(raw_root).resolve() / "state.sqlite"
-            with sqlite3.connect(database) as connection:
+            with contextlib.closing(sqlite3.connect(database)) as connection, connection:
                 connection.execute("CREATE TABLE sample(value TEXT)")
             database.chmod(0o644)
             self.assertFalse(sqlite_permission_report(database)["ok"])
@@ -89,6 +95,7 @@ class StatePermissionTests(unittest.TestCase):
             connection.close()
             self.assertEqual(mode(database), 0o600)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode drift is not meaningful on Windows")
     def test_doctor_fails_mode_drift_without_repairing_it(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
@@ -131,6 +138,14 @@ class StatePermissionTests(unittest.TestCase):
             )
             self.assertEqual(permission_check["status"], "fail")
             self.assertEqual(mode(state_db), 0o644)
+
+    def test_secure_connection_context_closes_the_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            database = Path(raw_root).resolve() / "state.sqlite"
+            with secure_sqlite_connect(database) as connection:
+                connection.execute("CREATE TABLE sample(value TEXT)")
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
 
 
 if __name__ == "__main__":

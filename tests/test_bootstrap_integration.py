@@ -41,6 +41,14 @@ class BootstrapIntegrationTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr)
+            self.assertTrue((vault / ".git" / "HEAD").is_file())
+            head = run(["git", "-C", str(vault), "rev-parse", "--verify", "HEAD"])
+            self.assertEqual(head.returncode, 0, head.stdout + head.stderr)
+            (vault / ".obsidian").mkdir()
+            (vault / ".obsidian" / "workspace.json").write_text("{}\n", encoding="utf-8")
+            status = run(["git", "-C", str(vault), "status", "--porcelain"])
+            self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+            self.assertEqual(status.stdout, "")
 
             env = os.environ.copy()
             env.update(

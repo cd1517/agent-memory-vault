@@ -10,6 +10,7 @@ from typing import Any, Iterable
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+POSIX_PERMISSION_MODEL = os.name != "nt"
 
 
 class StateSecurityError(OSError):
@@ -72,10 +73,11 @@ def ensure_private_directory(
             os.mkdir(directory, PRIVATE_DIRECTORY_MODE)
         except FileExistsError:
             _assert_directory(directory)
-        os.chmod(directory, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+        if POSIX_PERMISSION_MODEL:
+            os.chmod(directory, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
 
     _assert_directory(path)
-    if harden_existing:
+    if harden_existing and POSIX_PERMISSION_MODEL:
         os.chmod(path, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
     return path
 
@@ -95,7 +97,7 @@ def _inspect_private_file(path: Path, *, required: bool) -> list[dict[str, Any]]
     if not stat.S_ISREG(metadata.st_mode):
         return [{"path": str(path), "reason": "not_regular"}]
     actual_mode = stat.S_IMODE(metadata.st_mode)
-    if actual_mode != PRIVATE_FILE_MODE:
+    if POSIX_PERMISSION_MODEL and actual_mode != PRIVATE_FILE_MODE:
         return [
             {
                 "path": str(path),
@@ -136,7 +138,8 @@ def harden_private_file(raw_path: str | os.PathLike[str], *, required: bool = Tr
         raise StateSecurityError(f"private file must not be a symlink: {path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise StateSecurityError(f"private file is not regular: {path}")
-    os.chmod(path, PRIVATE_FILE_MODE, follow_symlinks=False)
+    if POSIX_PERMISSION_MODEL:
+        os.chmod(path, PRIVATE_FILE_MODE, follow_symlinks=False)
     return path
 
 
@@ -154,7 +157,8 @@ def _create_private_file(path: Path) -> None:
     except FileExistsError:
         return
     try:
-        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        if POSIX_PERMISSION_MODEL:
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
     finally:
         os.close(descriptor)
 
@@ -172,9 +176,12 @@ class PrivateSQLiteConnection(sqlite3.Connection):
         self._harden()
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
-        result = super().__exit__(exc_type, exc_value, traceback)
-        self._harden()
-        return bool(result)
+        try:
+            result = super().__exit__(exc_type, exc_value, traceback)
+            self._harden()
+            return bool(result)
+        finally:
+            self.close()
 
     def close(self) -> None:
         try:
@@ -264,7 +271,8 @@ def secure_append_text(raw_path: str | os.PathLike[str], text: str) -> Path:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise StateSecurityError(f"private log is not a regular file: {path}")
-        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        if POSIX_PERMISSION_MODEL:
+            os.fchmod(descriptor, PRIVATE_FILE_MODE)
         payload = text.encode("utf-8")
         offset = 0
         while offset < len(payload):

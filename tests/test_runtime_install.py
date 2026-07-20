@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sqlite3
 import stat
@@ -43,11 +44,19 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertTrue((root / "scripts" / "agent_memory_safety.py").is_file())
             self.assertTrue((root / "scripts" / "agent_memory_policy_benchmark.py").is_file())
             self.assertTrue((root / "scripts" / "agent_memory_state.py").is_file())
-            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+            self.assertTrue((root / "scripts" / "agent_memory_lock.py").is_file())
+            self.assertTrue((root / "scripts" / "install-windows.ps1").is_file())
+            self.assertTrue((root / "templates" / "vault" / "AGENTS.md").is_file())
             self.assertEqual(
-                stat.S_IMODE((root / "config" / "runtime-manifest.json").stat().st_mode),
-                0o600,
+                (root / "templates" / "vault" / ".gitignore").read_text(encoding="utf-8"),
+                ".obsidian/\n",
             )
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                self.assertEqual(
+                    stat.S_IMODE((root / "config" / "runtime-manifest.json").stat().st_mode),
+                    0o600,
+                )
 
             verify = subprocess.run(
                 [sys.executable, str(INSTALLER), "--config-root", str(root), "--verify", "--json"],
@@ -97,12 +106,66 @@ class RuntimeInstallTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
-            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(config_file.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(state_db.stat().st_mode), 0o600)
-            for suffix in ("-wal", "-shm"):
-                self.assertEqual(stat.S_IMODE(Path(f"{state_db}{suffix}").stat().st_mode), 0o600)
             connection.close()
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(config_file.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(state_db.stat().st_mode), 0o600)
+                for suffix in ("-wal", "-shm"):
+                    self.assertEqual(stat.S_IMODE(Path(f"{state_db}{suffix}").stat().st_mode), 0o600)
+
+    def test_installed_runtime_can_bootstrap_a_clean_git_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root).resolve()
+            runtime = root / "runtime with spaces"
+            vault = root / "vault with spaces"
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER), "--config-root", str(runtime), "--json"],
+                cwd=REPO_ROOT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+
+            bootstrap = subprocess.run(
+                [
+                    sys.executable,
+                    str(runtime / "scripts" / "bootstrap.py"),
+                    "--memory-root",
+                    str(vault),
+                ],
+                cwd=runtime,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            head = subprocess.run(
+                ["git", "-C", str(vault), "rev-parse", "--verify", "HEAD"],
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(head.returncode, 0, head.stdout + head.stderr)
+            (vault / ".obsidian").mkdir()
+            (vault / ".obsidian" / "workspace.json").write_text("{}\n", encoding="utf-8")
+            status = subprocess.run(
+                ["git", "-C", str(vault), "status", "--porcelain"],
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+            self.assertEqual(status.stdout, "")
 
 
 if __name__ == "__main__":

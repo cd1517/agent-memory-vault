@@ -10,18 +10,14 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 import agent_memory_intent as write_intent
 from agent_memory_state import absolute_path, secure_sqlite_connect
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
-VAULT_ROOT = Path(
-    os.path.expandvars(env_value("ROOT", str(RUNTIME_ROOT / "templates" / "vault")))
-).expanduser().resolve()
-STATE_DB = absolute_path(
-    os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-)
+VAULT_ROOT = expand_path(env_value("ROOT", str(RUNTIME_ROOT / "templates" / "vault"))).resolve()
+STATE_DB = absolute_path(expand_path(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite")))
 ACTOR_SESSION_ENV_KEYS = {
     "codex": ("AGENT_MEMORY_SESSION_ID", "CODEX_THREAD_ID"),
     "claude": ("AGENT_MEMORY_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"),

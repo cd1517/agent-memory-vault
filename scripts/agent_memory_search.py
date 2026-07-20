@@ -17,17 +17,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 from agent_memory_state import secure_sqlite_connect
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_ROOT = REPO_ROOT / "scripts"
 DEFAULT_VAULT_ROOT = REPO_ROOT / "templates" / "vault"
-VAULT_ROOT = Path(os.path.expandvars(env_value("ROOT", str(DEFAULT_VAULT_ROOT)))).expanduser().resolve()
-STATE_DB = Path(
-    os.path.expandvars(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite"))
-).expanduser().resolve()
+VAULT_ROOT = expand_path(env_value("ROOT", str(DEFAULT_VAULT_ROOT))).resolve()
+STATE_DB = expand_path(env_value("STATE_DB", "$HOME/.config/agent-memory/state.sqlite")).resolve()
 ZVEC_SCRIPT = SCRIPT_ROOT / "agent_memory_zvec_index.py"
 ZVEC_PYTHON = env_value("ZVEC_PYTHON", sys.executable)
 
@@ -353,6 +351,8 @@ def command_env_offline() -> dict[str, str]:
         env.pop(key, None)
     env.setdefault("HF_HUB_OFFLINE", "1")
     env.setdefault("TRANSFORMERS_OFFLINE", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
     return env
 
 
@@ -374,6 +374,8 @@ def zvec_search(args: argparse.Namespace) -> tuple[list[SearchResult], list[str]
         completed = subprocess.run(
             command,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=args.zvec_timeout,
             env=command_env_offline(),
@@ -453,7 +455,15 @@ def rg_search(args: argparse.Namespace) -> tuple[list[SearchResult], list[str]]:
         return [], []
     command = ["rg", "--line-number", "--ignore-case", "--fixed-strings", "--", args.query, str(VAULT_ROOT)]
     try:
-        completed = subprocess.run(command, text=True, capture_output=True, timeout=args.rg_timeout, check=False)
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=args.rg_timeout,
+            check=False,
+        )
     except FileNotFoundError:
         return [], ["rg not found"]
     except subprocess.TimeoutExpired:

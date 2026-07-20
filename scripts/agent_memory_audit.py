@@ -12,26 +12,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_memory_env import env_value
+from agent_memory_env import env_value, expand_path
 from agent_memory_state import absolute_path, secure_sqlite_connect
 
 
-CONFIG_ROOT = Path(
-    os.path.expandvars(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory"))
-).expanduser().resolve()
-STATE_DB = absolute_path(
-    os.path.expandvars(env_value("STATE_DB", str(CONFIG_ROOT / "state.sqlite")))
-)
-AUDIT_DB = absolute_path(
-    os.path.expandvars(env_value("AUDIT_DB", str(CONFIG_ROOT / "audit_decisions.sqlite")))
-)
-INVARIANTS_PATH = Path(
-    os.path.expandvars(env_value("INVARIANTS", str(CONFIG_ROOT / "config" / "system-invariants.json")))
-).expanduser().resolve()
+CONFIG_ROOT = expand_path(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory")).resolve()
+STATE_DB = absolute_path(expand_path(env_value("STATE_DB", str(CONFIG_ROOT / "state.sqlite"))))
+AUDIT_DB = absolute_path(expand_path(env_value("AUDIT_DB", str(CONFIG_ROOT / "audit_decisions.sqlite"))))
+INVARIANTS_PATH = expand_path(
+    env_value("INVARIANTS", str(CONFIG_ROOT / "config" / "system-invariants.json"))
+).resolve()
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VAULT_ROOT = Path(
-    os.path.expandvars(env_value("ROOT", str(REPO_ROOT / "templates" / "vault")))
-).expanduser().resolve()
+VAULT_ROOT = expand_path(env_value("ROOT", str(REPO_ROOT / "templates" / "vault"))).resolve()
 
 
 @dataclass

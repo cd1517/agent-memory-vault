@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_memory_state import (
+    POSIX_PERMISSION_MODEL,
     PRIVATE_DIRECTORY_MODE,
     PRIVATE_FILE_MODE,
     StateSecurityError,
@@ -25,6 +26,7 @@ from agent_memory_state import (
 
 SOURCE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SOURCE_ROOT.parent
+TEMPLATE_ROOT = REPO_ROOT / "templates" / "vault"
 CORE_FILES = (
     "agent_memory_audit.py",
     "agent_memory_audit_autorun.py",
@@ -37,6 +39,7 @@ CORE_FILES = (
     "agent_memory_evolution.py",
     "agent_memory_index.py",
     "agent_memory_intent.py",
+    "agent_memory_lock.py",
     "agent_memory_policy_benchmark.py",
     "agent_memory_retrieval_benchmark.py",
     "agent_memory_search.py",
@@ -45,9 +48,13 @@ CORE_FILES = (
     "agent_memory_state.py",
     "agent_memory_stop_hook.py",
     "agent_memory_zvec_index.py",
+    "audit-task.ps1",
     "bootstrap.py",
+    "install-codex-hook.ps1",
     "install_runtime.py",
+    "install-windows.ps1",
     "memoryctl",
+    "stop-hook.ps1",
 )
 SUPPORT_FILES = (
     "requirements-vector.lock",
@@ -69,10 +76,20 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def template_hashes() -> dict[str, str]:
+    return {
+        path.relative_to(REPO_ROOT).as_posix(): sha256(path)
+        for path in sorted(TEMPLATE_ROOT.rglob("*"))
+        if path.is_file()
+    }
+
+
 def git_value(*args: str) -> str:
     completed = subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=15,
         check=False,
@@ -83,6 +100,7 @@ def git_value(*args: str) -> str:
 def expected_manifest(config_root: Path) -> dict[str, Any]:
     hashes = {name: sha256(SOURCE_ROOT / name) for name in CORE_FILES}
     support_hashes = {name: sha256(REPO_ROOT / name) for name in SUPPORT_FILES}
+    installed_templates = template_hashes()
     return {
         "schema_version": 1,
         "installed_at": utc_now(),
@@ -92,6 +110,7 @@ def expected_manifest(config_root: Path) -> dict[str, Any]:
         "runtime_root": str(config_root),
         "files": hashes,
         "support_files": support_hashes,
+        "template_files": installed_templates,
     }
 
 
@@ -127,7 +146,7 @@ def runtime_permission_report(config_root: Path) -> dict[str, Any]:
             issues.append({"path": str(config_root), "reason": "not_directory"})
         else:
             actual_mode = stat.S_IMODE(metadata.st_mode)
-            if actual_mode != PRIVATE_DIRECTORY_MODE:
+            if POSIX_PERMISSION_MODEL and actual_mode != PRIVATE_DIRECTORY_MODE:
                 issues.append(
                     {
                         "path": str(config_root),
@@ -150,7 +169,7 @@ def runtime_permission_report(config_root: Path) -> dict[str, Any]:
                 issues.append({"path": str(path), "reason": "symlink"})
             elif stat.S_ISREG(metadata.st_mode):
                 actual_mode = stat.S_IMODE(metadata.st_mode)
-                if actual_mode != PRIVATE_FILE_MODE:
+                if POSIX_PERMISSION_MODEL and actual_mode != PRIVATE_FILE_MODE:
                     issues.append(
                         {
                             "path": str(path),
@@ -197,9 +216,20 @@ def verify(config_root: Path) -> dict[str, Any]:
                 support_missing.append(str(name))
             elif sha256(path) != str(digest):
                 support_mismatched.append(str(name))
+    template_missing: list[str] = []
+    template_mismatched: list[str] = []
+    template_expected = manifest.get("template_files", {}) if isinstance(manifest, dict) else {}
+    if isinstance(template_expected, dict):
+        for name, digest in template_expected.items():
+            path = config_root / str(name)
+            if not path.is_file():
+                template_missing.append(str(name))
+            elif sha256(path) != str(digest):
+                template_mismatched.append(str(name))
     permissions = runtime_permission_report(config_root)
     return {
-        "ok": not missing and not mismatched and not support_missing and not support_mismatched and permissions["ok"],
+        "ok": not missing and not mismatched and not support_missing and not support_mismatched
+        and not template_missing and not template_mismatched and permissions["ok"],
         "manifest": str(manifest_path),
         "source_commit": manifest.get("source_commit", ""),
         "source_dirty": bool(manifest.get("source_dirty")),
@@ -208,6 +238,8 @@ def verify(config_root: Path) -> dict[str, Any]:
         "mismatched": mismatched,
         "support_missing": support_missing,
         "support_mismatched": support_mismatched,
+        "template_missing": template_missing,
+        "template_mismatched": template_mismatched,
         "permissions": permissions,
     }
 
@@ -225,18 +257,29 @@ def install(config_root: Path, dry_run: bool) -> dict[str, Any]:
         target = script_root / name
         if target.is_file() and sha256(target) == manifest["files"][name]:
             unchanged.append(name)
-            if not dry_run:
+            if not dry_run and POSIX_PERMISSION_MODEL:
                 target.chmod(source.stat().st_mode & 0o777)
             continue
         changed.append(name)
         if not dry_run:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            target.chmod(source.stat().st_mode & 0o777)
+            if POSIX_PERMISSION_MODEL:
+                target.chmod(source.stat().st_mode & 0o777)
     for name in SUPPORT_FILES:
         source = REPO_ROOT / name
         target = config_root / name
         if target.is_file() and sha256(target) == manifest["support_files"][name]:
+            unchanged.append(name)
+            continue
+        changed.append(name)
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    for name, digest in manifest["template_files"].items():
+        source = REPO_ROOT / name
+        target = config_root / name
+        if target.is_file() and sha256(target) == digest:
             unchanged.append(name)
             continue
         changed.append(name)
