@@ -20,7 +20,12 @@ from typing import Any
 
 from agent_memory_env import env_value, expand_path, load_config
 from agent_memory_lock import try_lock, unlock
-from agent_memory_claim import active_claim_rows, complete_claim_paths, record_file_observations
+from agent_memory_claim import (
+    active_claim_rows,
+    complete_claim_paths,
+    parse_deleted_observation,
+    record_file_observations,
+)
 from agent_memory_safety import KNOWLEDGE_KINDS, SOURCE_CLASSES, assess_source, record_assessment
 from agent_memory_state import POSIX_PERMISSION_MODEL, secure_append_text, secure_sqlite_connect
 import agent_memory_intent as write_intent
@@ -237,6 +242,16 @@ def repo_path_in_vault(repo_path: str) -> bool:
     return candidate == vault_repo_path or candidate.startswith(f"{vault_repo_path}/")
 
 
+def repo_path_is_memory_markdown(repo_path: str) -> bool:
+    if not repo_path_in_vault(repo_path):
+        return False
+    return GitEntry(
+        status="",
+        repo_path=repo_path,
+        path=(REPO_ROOT / repo_path).resolve(),
+    ).is_memory_markdown
+
+
 def git_status_entries() -> tuple[list[GitEntry], list[str]]:
     result = run_command(
         [
@@ -265,10 +280,10 @@ def git_status_entries() -> tuple[list[GitEntry], list[str]]:
             previous_repo_path = items[index + 1]
             index += 1
         if entry:
-            if repo_path_in_vault(entry.repo_path):
+            if repo_path_is_memory_markdown(entry.repo_path):
                 entry.previous_repo_path = previous_repo_path
                 entries.append(entry)
-            elif entry.status.startswith("R") and repo_path_in_vault(previous_repo_path):
+            elif entry.status.startswith("R") and repo_path_is_memory_markdown(previous_repo_path):
                 old_path = (REPO_ROOT / previous_repo_path).resolve()
                 entries.append(GitEntry(status="D", repo_path=previous_repo_path, path=old_path))
         index += 1
@@ -337,7 +352,7 @@ def git_history_entries(baseline: str, head: str) -> tuple[list[GitEntry], list[
             previous_repo_path = ""
             repo_path = items[index]
             index += 1
-        if repo_path_in_vault(repo_path):
+        if repo_path_is_memory_markdown(repo_path):
             entries.append(
                 GitEntry(
                     status=status,
@@ -346,7 +361,7 @@ def git_history_entries(baseline: str, head: str) -> tuple[list[GitEntry], list[
                     previous_repo_path=previous_repo_path,
                 )
             )
-        elif status.startswith("R") and repo_path_in_vault(previous_repo_path):
+        elif status.startswith("R") and repo_path_is_memory_markdown(previous_repo_path):
             old_path = (REPO_ROOT / previous_repo_path).resolve()
             entries.append(GitEntry(status="D", repo_path=previous_repo_path, path=old_path))
     return entries, []
@@ -365,6 +380,9 @@ def explicit_entries(paths: list[str]) -> tuple[list[GitEntry], list[str]]:
             repo_path = str(path.relative_to(REPO_ROOT))
         except ValueError:
             warnings.append(f"changed file outside repo skipped: {path}")
+            continue
+        if not repo_path_is_memory_markdown(repo_path):
+            warnings.append(f"changed non-memory file skipped: {path}")
             continue
         status = "??" if path.exists() else "D"
         entries.append(GitEntry(status=status, repo_path=repo_path, path=path))
@@ -1118,17 +1136,88 @@ def unobserved_history_entries(entries: list[GitEntry]) -> list[GitEntry]:
             pragmas=("PRAGMA busy_timeout=5000",),
         ) as conn:
             rows = conn.execute("SELECT path, sha256 FROM memory_file_observations").fetchall()
+            deletion_rows: list[tuple[Any, ...]] = []
+            try:
+                deletion_rows = conn.execute(
+                    """
+                    SELECT path, sentinel, actor, user_authorized,
+                           deletion_commit, parent_commit, prior_sha256,
+                           trash_sha256, trash_path_sha256,
+                           evidence_ref_sha256, evidence_ref_length
+                    FROM memory_deletion_observations
+                    """
+                ).fetchall()
+            except sqlite3.Error:
+                # Older state databases legitimately predate deletion observations.
+                deletion_rows = []
     except (OSError, sqlite3.Error):
         return entries
     observed = {str(Path(str(path)).resolve()): str(digest) for path, digest in rows}
+    deletion_audits: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in deletion_rows:
+        (
+            path,
+            sentinel,
+            actor,
+            user_authorized,
+            commit,
+            parent_commit,
+            prior_sha256,
+            trash_sha256,
+            trash_path_sha256,
+            evidence_ref_sha256,
+            evidence_ref_length,
+        ) = row
+        parsed = parse_deleted_observation(str(sentinel))
+        try:
+            authorized = int(user_authorized) == 1
+            evidence_length = int(evidence_ref_length)
+        except (TypeError, ValueError):
+            continue
+        if (
+            parsed is None
+            or str(actor) != "human"
+            or not authorized
+            or parsed != (str(commit), str(prior_sha256))
+            or str(trash_sha256) != str(prior_sha256)
+            or re.fullmatch(r"[0-9a-f]{40}", str(parent_commit)) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(trash_path_sha256)) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(evidence_ref_sha256)) is None
+            or not 0 < evidence_length <= 4096
+        ):
+            continue
+        deletion_audits[(str(Path(str(path)).resolve()), str(sentinel))] = parsed
     pending: list[GitEntry] = []
     for entry in entries:
+        resolved_path = str(entry.path.resolve())
         try:
             digest = hashlib.sha256(entry.path.read_bytes()).hexdigest()
         except OSError:
+            sentinel = observed.get(resolved_path, "")
+            parsed = parse_deleted_observation(sentinel)
+            audit = deletion_audits.get((resolved_path, sentinel))
+            if entry.is_deleted and parsed is not None and audit == parsed:
+                deletion_commit, _prior_sha256 = parsed
+                latest = run_command(
+                    [
+                        "git",
+                        "-C",
+                        str(REPO_ROOT),
+                        "log",
+                        "-1",
+                        "--format=%H",
+                        "HEAD",
+                        "--",
+                        entry.repo_path,
+                    ],
+                    timeout=30,
+                )
+                latest_commit = str(latest.get("stdout", "")).strip().lower()
+                if latest.get("ok") and latest_commit == deletion_commit:
+                    continue
             pending.append(entry)
             continue
-        if observed.get(str(entry.path.resolve())) != digest:
+        if observed.get(resolved_path) != digest:
             pending.append(entry)
     return pending
 
@@ -1155,12 +1244,19 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
     previous_observed_head = last_observed_git_head()
     history_entries, history_warnings = git_history_entries(previous_observed_head, git_head_before)
     warnings.extend(history_warnings)
-    if history_entries:
-        info.append(f"recovered {len(history_entries)} memory file changes from Git history after an external/automatic commit")
+    pending_history_entries = unobserved_history_entries(history_entries)
+    if pending_history_entries:
+        info.append(
+            f"recovered {len(pending_history_entries)} unobserved memory file changes "
+            "from Git history after an external/automatic commit"
+        )
+    observed_history_count = len(history_entries) - len(pending_history_entries)
+    if observed_history_count:
+        info.append(f"ignored {observed_history_count} historical memory files with matching closeout observations")
     explicit, explicit_warnings = explicit_entries(args.changed_file)
     warnings.extend(explicit_warnings)
 
-    by_path: dict[Path, GitEntry] = {entry.path: entry for entry in history_entries}
+    by_path: dict[Path, GitEntry] = {entry.path: entry for entry in pending_history_entries}
     for entry in git_entries:
         by_path[entry.path] = entry
     for entry in explicit:
@@ -1229,7 +1325,7 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
     intent_error = ""
     try:
         intent_gate = write_intent.enforce_protected_changes(
-            [entry.path for entry in all_entries],
+            [entry.path for entry in process_entries],
             actor=args.actor,
             raw_session_id=args.session_id,
             intent_ids=claim_intent_ids,
@@ -1362,8 +1458,9 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
             info.append(f"audit dry-run check: {due_text}; report={audit_payload.get('report_path', '')}")
         else:
             info.append(f"audit check: {audit_status}; report={audit_payload.get('report_path', '')}")
-    elif not audit_step.get("ok"):
-        info.append(f"audit autorun failed: {str(audit_step.get('stderr', '')).strip()[:300]}")
+    elif not audit_step.get("ok") and not audit_step.get("skipped"):
+        detail = str(audit_step.get("stderr", "")).strip() or str(audit_step.get("detail", "")).strip()
+        info.append(f"audit autorun failed: {detail[:300]}")
 
     blocking_reconcile = bool(reconcile_findings)
     step_failed = bool(preflight_error) or not all(
@@ -1459,7 +1556,7 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
     warnings.extend(after_warnings)
     dirty_paths = {entry.path for entry in git_entries}
     unclaimed_history = unobserved_history_entries(
-        [entry for entry in history_entries if entry.path in {item.path for item in unclaimed_entries}]
+        [entry for entry in pending_history_entries if entry.path in {item.path for item in unclaimed_entries}]
     )
     can_advance_baseline = (
         status == "ok" and not step_failed and intent_step.get("ok")

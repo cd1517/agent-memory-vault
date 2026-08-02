@@ -16,6 +16,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import agent_memory_claim as claim
+import agent_memory_closeout as closeout
 import agent_memory_doctor as doctor
 
 
@@ -33,6 +34,38 @@ def git(root: Path, *args: str) -> str:
 
 
 class DurabilityGuardTests(unittest.TestCase):
+    def test_doctor_reports_unobserved_closeout_history(self) -> None:
+        pending = closeout.GitEntry(
+            status="M",
+            repo_path="AgentMemory/项目/pending.md",
+            path=Path("/tmp/AgentMemory/项目/pending.md"),
+        )
+        with (
+            mock.patch.object(closeout, "last_observed_git_head", return_value="a" * 40),
+            mock.patch.object(closeout, "current_git_head", return_value=("b" * 40, [])),
+            mock.patch.object(closeout, "git_history_entries", return_value=([pending], [])),
+            mock.patch.object(closeout, "unobserved_history_entries", return_value=[pending]),
+            mock.patch.object(closeout, "relative_to_vault", return_value="项目/pending.md"),
+        ):
+            healthy, detail = doctor.closeout_observation_health()
+
+        self.assertFalse(healthy)
+        self.assertEqual(detail["pending_count"], 1)
+        self.assertEqual(detail["pending_existing"], ["项目/pending.md"])
+        self.assertEqual(detail["pending_deleted"], [])
+
+    def test_doctor_accepts_fully_observed_closeout_history(self) -> None:
+        with (
+            mock.patch.object(closeout, "last_observed_git_head", return_value="a" * 40),
+            mock.patch.object(closeout, "current_git_head", return_value=("b" * 40, [])),
+            mock.patch.object(closeout, "git_history_entries", return_value=([], [])),
+            mock.patch.object(closeout, "unobserved_history_entries", return_value=[]),
+        ):
+            healthy, detail = doctor.closeout_observation_health()
+
+        self.assertTrue(healthy)
+        self.assertEqual(detail["pending_count"], 0)
+
     def test_derived_repair_uses_configured_semantic_python(self) -> None:
         configured_python = Path("/configured/vector/python")
         with mock.patch.object(doctor, "SEMANTIC_ENABLED", True), mock.patch.object(

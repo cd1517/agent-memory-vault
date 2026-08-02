@@ -127,6 +127,25 @@ python3 scripts/memoryctl --actor human claims-expire --older-than-hours 24 --js
 python3 scripts/memoryctl --actor human claims-expire --older-than-hours 24 --apply --json
 ```
 
+如果一个正式 Markdown 已经按用户明确指令移入系统垃圾篓、又被外部备份工具提前提交为 Git 删除，可由人工维护显式登记可恢复删除。命令默认只预览；只有 `--apply` 才会写入审计表和 `deleted:<commit>:<prior_sha256>` 观察指纹。它会核对目标当前缺失、删除提交属于当前历史、父提交确实包含并删除该文件，以及垃圾篓副本与删除前 Git blob 完全一致。`evidence-ref` 和垃圾篓绝对路径只保存哈希，不写入正文或输出：
+
+```bash
+python3 scripts/memoryctl --actor human observe-deletion \
+  --file "/absolute/vault/项目/已删除.md" \
+  --trash-path "$HOME/.Trash/已删除.md" \
+  --deletion-commit "40-hex-commit" \
+  --evidence-ref "current-user-authorization-reference" \
+  --confirm-user-authorized --json
+
+# 逐项确认预览后才应用：
+python3 scripts/memoryctl --actor human observe-deletion \
+  --file "/absolute/vault/项目/已删除.md" \
+  --trash-path "$HOME/.Trash/已删除.md" \
+  --deletion-commit "40-hex-commit" \
+  --evidence-ref "current-user-authorization-reference" \
+  --confirm-user-authorized --apply --json
+```
+
 搜索示例：
 
 ```bash

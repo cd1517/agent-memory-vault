@@ -47,12 +47,12 @@ class CloseoutRenameTests(unittest.TestCase):
         self.root = Path(self.tempdir.name).resolve()
         self.old_vault = self.root / "MemoryBeforeRename"
         self.new_vault = self.root / "Agent记忆"
-        self.old_vault.mkdir()
+        (self.old_vault / "项目").mkdir(parents=True)
         git(self.root, "init", "-q")
         git(self.root, "config", "user.name", "Agent Memory Test")
         git(self.root, "config", "user.email", "test@example.invalid")
-        (self.old_vault / "existing.md").write_text("# Existing\n", encoding="utf-8")
-        git(self.root, "add", "MemoryBeforeRename/existing.md")
+        (self.old_vault / "项目" / "existing.md").write_text("# Existing\n", encoding="utf-8")
+        git(self.root, "add", "MemoryBeforeRename/项目/existing.md")
         git(self.root, "commit", "-qm", "baseline")
         self.baseline = git(self.root, "rev-parse", "HEAD")
         self.module.REPO_ROOT = self.root
@@ -63,8 +63,8 @@ class CloseoutRenameTests(unittest.TestCase):
 
     def migrate_without_commit(self) -> None:
         git(self.root, "mv", "MemoryBeforeRename", "Agent记忆")
-        (self.new_vault / "new.md").write_text("# New\n", encoding="utf-8")
-        git(self.root, "add", "Agent记忆/new.md")
+        (self.new_vault / "项目" / "new.md").write_text("# New\n", encoding="utf-8")
+        git(self.root, "add", "Agent记忆/项目/new.md")
 
     def assert_rename_and_add(self, entries) -> None:
         by_name = {entry.path.name: entry for entry in entries}
@@ -72,7 +72,7 @@ class CloseoutRenameTests(unittest.TestCase):
         self.assertTrue(by_name["existing.md"].status.startswith("R"))
         self.assertEqual(
             by_name["existing.md"].previous_repo_path,
-            "MemoryBeforeRename/existing.md",
+            "MemoryBeforeRename/项目/existing.md",
         )
         self.assertFalse(by_name["existing.md"].is_new)
         self.assertTrue(by_name["new.md"].is_new)
@@ -90,6 +90,211 @@ class CloseoutRenameTests(unittest.TestCase):
         entries, warnings = self.module.git_history_entries(self.baseline, head)
         self.assertEqual(warnings, [])
         self.assert_rename_and_add(entries)
+
+
+class CloseoutHistoryCandidateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.module = load_closeout()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name).resolve()
+        self.vault = self.root / "AgentMemory"
+        (self.vault / "项目").mkdir(parents=True)
+        self.note = self.vault / "项目" / "note.md"
+        self.metadata = self.vault / ".DS_Store"
+        self.note.write_text("# Note\n", encoding="utf-8")
+        self.metadata.write_bytes(b"metadata-v1")
+        git(self.root, "init", "-q")
+        git(self.root, "config", "user.name", "Agent Memory Test")
+        git(self.root, "config", "user.email", "test@example.invalid")
+        git(self.root, "add", "AgentMemory")
+        git(self.root, "commit", "-qm", "baseline")
+        self.baseline = git(self.root, "rev-parse", "HEAD")
+        self.module.REPO_ROOT = self.root
+        self.module.VAULT_ROOT = self.vault
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_history_ignores_tracked_non_markdown_metadata(self) -> None:
+        self.note.write_text("# Note\n\nChanged.\n", encoding="utf-8")
+        self.metadata.write_bytes(b"metadata-v2")
+        git(self.root, "add", "AgentMemory")
+        git(self.root, "commit", "-qm", "external backup")
+        head = git(self.root, "rev-parse", "HEAD")
+
+        entries, warnings = self.module.git_history_entries(self.baseline, head)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([entry.repo_path for entry in entries], ["AgentMemory/项目/note.md"])
+
+    def test_dirty_status_ignores_tracked_non_markdown_metadata(self) -> None:
+        self.note.write_text("# Note\n\nChanged.\n", encoding="utf-8")
+        self.metadata.write_bytes(b"metadata-v2")
+
+        entries, warnings = self.module.git_status_entries()
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([entry.repo_path for entry in entries], ["AgentMemory/项目/note.md"])
+
+    def _record_deleted_observation(
+        self,
+        path: Path,
+        deletion_commit: str,
+        prior_sha256: str,
+        *,
+        actor: str = "human",
+        trash_sha256: str | None = None,
+        evidence_ref_sha256: str | None = None,
+    ) -> None:
+        sentinel = f"deleted:{deletion_commit}:{prior_sha256}"
+        trash_digest = trash_sha256 or prior_sha256
+        evidence_digest = evidence_ref_sha256 or ("e" * 64)
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS memory_file_observations "
+                "(path TEXT PRIMARY KEY, sha256 TEXT NOT NULL)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_deletion_observations (
+                  observation_id TEXT PRIMARY KEY,
+                  path TEXT NOT NULL,
+                  rel_path TEXT NOT NULL,
+                  sentinel TEXT NOT NULL,
+                  actor TEXT NOT NULL,
+                  user_authorized INTEGER NOT NULL,
+                  deletion_commit TEXT NOT NULL,
+                  parent_commit TEXT NOT NULL,
+                  prior_sha256 TEXT NOT NULL,
+                  trash_sha256 TEXT NOT NULL,
+                  trash_path_sha256 TEXT NOT NULL,
+                  evidence_ref_sha256 TEXT NOT NULL,
+                  evidence_ref_length INTEGER NOT NULL,
+                  observed_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_file_observations(path, sha256) VALUES (?, ?)",
+                (str(path), sentinel),
+            )
+            conn.execute(
+                "INSERT INTO memory_deletion_observations "
+                "(observation_id, path, rel_path, sentinel, actor, user_authorized, "
+                "deletion_commit, parent_commit, prior_sha256, trash_sha256, "
+                "trash_path_sha256, evidence_ref_sha256, evidence_ref_length, observed_at) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 12, ?)",
+                (
+                    hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+                    str(path),
+                    path.relative_to(self.vault).as_posix(),
+                    sentinel,
+                    actor,
+                    deletion_commit,
+                    "a" * 40,
+                    prior_sha256,
+                    trash_digest,
+                    "b" * 64,
+                    evidence_digest,
+                    "2026-08-02T00:00:00+00:00",
+                ),
+            )
+
+    def test_history_accepts_audited_deletion_observation_for_latest_path_change(self) -> None:
+        deleted = self.vault / "项目" / "deleted.md"
+        content = b"# Deleted\n"
+        deleted.write_bytes(content)
+        git(self.root, "add", "AgentMemory/项目/deleted.md")
+        git(self.root, "commit", "-qm", "add note that will be deleted")
+        trash = self.root / ".Trash"
+        trash.mkdir()
+        deleted.replace(trash / "deleted.md")
+        git(self.root, "add", "-u", "AgentMemory/项目/deleted.md")
+        git(self.root, "commit", "-qm", "authorized deletion")
+        deletion_commit = git(self.root, "rev-parse", "HEAD")
+        prior_sha256 = hashlib.sha256(content).hexdigest()
+        self.module.STATE_DB = self.root / "state.sqlite"
+        self._record_deleted_observation(deleted, deletion_commit, prior_sha256)
+        entry = self.module.GitEntry(
+            status="D",
+            repo_path="AgentMemory/项目/deleted.md",
+            path=deleted,
+        )
+
+        self.assertEqual(self.module.unobserved_history_entries([entry]), [])
+
+    def test_old_deletion_observation_does_not_authorize_a_later_redelete(self) -> None:
+        deleted = self.vault / "项目" / "redeleted.md"
+        content = b"# Re-deleted\n"
+        deleted.write_bytes(content)
+        git(self.root, "add", "AgentMemory/项目/redeleted.md")
+        git(self.root, "commit", "-qm", "add redelete note")
+        trash = self.root / ".Trash"
+        trash.mkdir()
+        first_trash = trash / "redeleted-first.md"
+        deleted.replace(first_trash)
+        git(self.root, "add", "-u", "AgentMemory/项目/redeleted.md")
+        git(self.root, "commit", "-qm", "first authorized deletion")
+        first_deletion = git(self.root, "rev-parse", "HEAD")
+        prior_sha256 = hashlib.sha256(content).hexdigest()
+        self.module.STATE_DB = self.root / "state.sqlite"
+        self._record_deleted_observation(deleted, first_deletion, prior_sha256)
+
+        deleted.write_bytes(content)
+        git(self.root, "add", "AgentMemory/项目/redeleted.md")
+        git(self.root, "commit", "-qm", "restore note")
+        deleted.replace(trash / "redeleted-second.md")
+        git(self.root, "add", "-u", "AgentMemory/项目/redeleted.md")
+        git(self.root, "commit", "-qm", "later deletion")
+        entry = self.module.GitEntry(
+            status="D",
+            repo_path="AgentMemory/项目/redeleted.md",
+            path=deleted,
+        )
+
+        self.assertEqual(self.module.unobserved_history_entries([entry]), [entry])
+
+    def test_history_rejects_wrong_actor_trash_hash_or_evidence_hash(self) -> None:
+        deleted = self.vault / "项目" / "invalid-audit.md"
+        content = b"# Invalid audit\n"
+        deleted.write_bytes(content)
+        git(self.root, "add", "AgentMemory/项目/invalid-audit.md")
+        git(self.root, "commit", "-qm", "add invalid audit note")
+        trash = self.root / ".Trash"
+        trash.mkdir()
+        deleted.replace(trash / "invalid-audit.md")
+        git(self.root, "add", "-u", "AgentMemory/项目/invalid-audit.md")
+        git(self.root, "commit", "-qm", "delete invalid audit note")
+        deletion_commit = git(self.root, "rev-parse", "HEAD")
+        prior_sha256 = hashlib.sha256(content).hexdigest()
+        self.module.STATE_DB = self.root / "state.sqlite"
+        entry = self.module.GitEntry(
+            status="D",
+            repo_path="AgentMemory/项目/invalid-audit.md",
+            path=deleted,
+        )
+
+        self._record_deleted_observation(
+            deleted,
+            deletion_commit,
+            prior_sha256,
+            actor="migration",
+        )
+        self.assertEqual(self.module.unobserved_history_entries([entry]), [entry])
+
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
+            conn.execute(
+                "UPDATE memory_deletion_observations SET actor='human', trash_sha256=?",
+                ("c" * 64,),
+            )
+        self.assertEqual(self.module.unobserved_history_entries([entry]), [entry])
+
+        with contextlib.closing(sqlite3.connect(self.module.STATE_DB)) as conn, conn:
+            conn.execute(
+                "UPDATE memory_deletion_observations "
+                "SET trash_sha256=prior_sha256, evidence_ref_sha256=''"
+            )
+        self.assertEqual(self.module.unobserved_history_entries([entry]), [entry])
 
 
 class CloseoutReconcileStatusTests(unittest.TestCase):

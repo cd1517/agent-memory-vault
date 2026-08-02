@@ -21,7 +21,7 @@ from agent_memory_env import env_value, expand_path, load_config
 from agent_memory_state import absolute_path, secure_sqlite_connect, sqlite_permission_report
 
 
-VERSION = "2.2"
+VERSION = "2.3"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_ROOT = expand_path(env_value("ROOT", str(REPO_ROOT / "templates" / "vault"))).resolve()
 GIT_ROOT = expand_path(env_value("GIT_ROOT", str(REPO_ROOT))).resolve()
@@ -86,6 +86,33 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def closeout_observation_health() -> tuple[bool, dict[str, Any]]:
+    """Report formal-memory history that still lacks a completed closeout observation."""
+    try:
+        import agent_memory_closeout as closeout
+
+        baseline = closeout.last_observed_git_head()
+        head, head_warnings = closeout.current_git_head()
+        entries, history_warnings = closeout.git_history_entries(baseline, head)
+        pending = closeout.unobserved_history_entries(entries)
+    except (AttributeError, ImportError, OSError, sqlite3.Error, subprocess.SubprocessError, ValueError) as exc:
+        return False, {"error": type(exc).__name__}
+
+    warnings = [*head_warnings, *history_warnings]
+    pending_existing = sorted(closeout.relative_to_vault(entry.path) for entry in pending if not entry.is_deleted)
+    pending_deleted = sorted(closeout.relative_to_vault(entry.path) for entry in pending if entry.is_deleted)
+    detail = {
+        "baseline": baseline,
+        "head": head,
+        "history_paths": len(entries),
+        "pending_count": len(pending),
+        "pending_existing": pending_existing,
+        "pending_deleted": pending_deleted,
+        "warnings": warnings,
+    }
+    return bool(baseline and head and not warnings and not pending), detail
 
 
 def offline_env() -> dict[str, str]:
@@ -725,6 +752,23 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
     add(checks, "audit_freshness", "pass" if age is not None and age <= 7 else "warn", f"Last successful audit age: {age} days." if age is not None else "No successful audit recorded.")
     closeout = latest_jsonl(CLOSEOUT_LOG)
     add(checks, "closeout_history", "pass" if closeout and closeout.get("status") in {"ok", "warning"} else "warn", f"Latest closeout status: {closeout.get('status')}." if closeout else "No closeout history.")
+    observation_ok, observation_detail = closeout_observation_health()
+    pending_observations = int(observation_detail.get("pending_count", 0) or 0)
+    if observation_ok:
+        observation_message = "Closeout observation baseline covers current formal memory history."
+    elif not observation_detail.get("baseline"):
+        observation_message = "No completed closeout observation baseline is recorded."
+    elif observation_detail.get("warnings") or observation_detail.get("error"):
+        observation_message = "Closeout observation baseline could not be verified."
+    else:
+        observation_message = f"{pending_observations} formal memory paths still lack closeout completion observations."
+    add(
+        checks,
+        "closeout_observation_baseline",
+        "pass" if observation_ok else "warn",
+        observation_message,
+        observation_detail,
+    )
 
     remote_has_credential = git_remote_has_credential()
     add(

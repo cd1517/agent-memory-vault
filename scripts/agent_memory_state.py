@@ -208,9 +208,9 @@ def secure_sqlite_connect(
 
     path = absolute_path(raw_path)
     if read_only:
-        # A diagnostic/dry-run open must not create or chmod anything.  The
-        # writable path below deliberately creates/hardens private state; the
-        # read-only path only verifies that the existing parent is usable.
+        # A diagnostic/dry-run open must not create the main database or chmod
+        # private state. The query-only WAL fallback below may participate in
+        # normal SQLite locking/sidecar handling, but never creates the DB.
         _assert_directory(path.parent)
         if not path.parent.exists():
             raise StateSecurityError(f"SQLite parent directory is missing: {path.parent}")
@@ -232,28 +232,61 @@ def secure_sqlite_connect(
     if repair_permissions:
         harden_sqlite_files(path)
 
-    connection_target = f"{path.as_uri()}?mode=ro" if read_only else str(path)
-    connection = sqlite3.connect(
-        connection_target,
-        timeout=timeout,
-        factory=PrivateSQLiteConnection,
-        uri=read_only,
-    )
-    connection._agent_memory_path = path  # type: ignore[attr-defined]
-    connection._agent_memory_repair_permissions = repair_permissions  # type: ignore[attr-defined]
-    if row_factory is not None:
-        connection.row_factory = row_factory
+    def open_connection(target: str, *, uri: bool, query_only: bool) -> sqlite3.Connection:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                target,
+                timeout=timeout,
+                factory=PrivateSQLiteConnection,
+                uri=uri,
+            )
+            connection._agent_memory_path = path  # type: ignore[attr-defined]
+            connection._agent_memory_repair_permissions = repair_permissions  # type: ignore[attr-defined]
+            if row_factory is not None:
+                connection.row_factory = row_factory
+            if query_only:
+                connection.execute("PRAGMA query_only=ON")
+            for pragma in pragmas:
+                connection.execute(pragma)
+                if query_only:
+                    # Do not let a caller-supplied PRAGMA leave the fallback
+                    # connection writable (for example, query_only=OFF).
+                    connection.execute("PRAGMA query_only=ON")
+            if query_only:
+                # SQLite can defer opening WAL/SHM until the first schema read.
+                # Probe here so a mode=ro WAL failure can use the safe fallback
+                # below instead of surfacing later during the caller's query.
+                connection.execute("PRAGMA schema_version").fetchone()
+            if repair_permissions:
+                harden_sqlite_files(path)
+            return connection
+        except Exception:
+            if connection is not None:
+                connection.close()
+            raise
+
+    if not read_only:
+        return open_connection(str(path), uri=False, query_only=False)
+
+    read_only_target = f"{path.as_uri()}?mode=ro"
     try:
-        if read_only:
-            connection.execute("PRAGMA query_only=ON")
-        for pragma in pragmas:
-            connection.execute(pragma)
-        if repair_permissions:
-            harden_sqlite_files(path)
-    except Exception:
-        connection.close()
-        raise
-    return connection
+        return open_connection(read_only_target, uri=True, query_only=True)
+    except sqlite3.OperationalError as exc:
+        error_code = getattr(exc, "sqlite_errorcode", None)
+        cant_open = (
+            isinstance(error_code, int)
+            and (error_code & 0xFF) == getattr(sqlite3, "SQLITE_CANTOPEN", 14)
+        ) or "unable to open database file" in str(exc).lower()
+        if not cant_open:
+            raise
+
+    # Some SQLite builds cannot attach WAL/SHM through mode=ro even when the
+    # database and sidecars are accessible. mode=rw still refuses to create a
+    # missing database, honors WAL and locking, and query_only blocks SQL
+    # writes. Never use immutable here: it can silently ignore live WAL pages.
+    read_existing_target = f"{path.as_uri()}?mode=rw"
+    return open_connection(read_existing_target, uri=True, query_only=True)
 
 
 def secure_append_text(raw_path: str | os.PathLike[str], text: str) -> Path:

@@ -106,13 +106,15 @@ class RuntimeInstallTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
-            connection.close()
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
                 self.assertEqual(stat.S_IMODE(config_file.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(state_db.stat().st_mode), 0o600)
                 for suffix in ("-wal", "-shm"):
                     self.assertEqual(stat.S_IMODE(Path(f"{state_db}{suffix}").stat().st_mode), 0o600)
+            # SQLite may checkpoint and remove WAL sidecars when the final
+            # connection closes, so inspect their repaired modes first.
+            connection.close()
 
     def test_installed_runtime_can_bootstrap_a_clean_git_vault(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
