@@ -786,6 +786,7 @@ def validate_committed_observation(
         and re.fullmatch(r"[0-9a-f]{64}", original_evidence) is not None
         and re.fullmatch(r"[0-9a-f]{40}", proposal_commit) is not None
         and re.fullmatch(r"[0-9a-f]{40}", base_head) is not None
+        and base_head != proposal_commit
         and re.fullmatch(r"[0-9a-f]{40}", validated_head) is not None
         and created_at is not None
         and validated_at is not None

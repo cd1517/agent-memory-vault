@@ -482,6 +482,29 @@ raise SystemExit(3)
         self.assertEqual(corrupted.returncode, 2, corrupted.stderr + corrupted.stdout)
         self.assertIn("not eligible", self.box.json_payload(corrupted)["error"])
 
+        proposal_commit = git(
+            self.box.git_root,
+            "log",
+            "-1",
+            "--format=%H",
+            "--",
+            "AgentMemory/用户记忆/偏好与边界.md",
+        )
+        with sqlite3.connect(self.box.state_db) as conn:
+            conn.execute(
+                "UPDATE memory_write_receipts SET evidence_ref_sha256=?, base_git_head=? "
+                "WHERE intent_id=?",
+                ("d" * 64, proposal_commit, intent_id),
+            )
+            conn.execute(
+                "UPDATE memory_write_intents SET base_git_head=? WHERE intent_id=?",
+                (proposal_commit, intent_id),
+            )
+            conn.commit()
+        equal_base = self.box.ctl("human", "human-maintenance", "observe-committed", *observe_args)
+        self.assertEqual(equal_base.returncode, 2, equal_base.stderr + equal_base.stdout)
+        self.assertIn("not eligible", self.box.json_payload(equal_base)["error"])
+
     def test_complete_dry_run_leaves_state_database_byte_identical(self) -> None:
         session = "codex-dry-run-readonly"
         target = self.box.vault / "工作流" / "Protected.md"
