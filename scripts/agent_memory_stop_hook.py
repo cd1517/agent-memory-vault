@@ -41,6 +41,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stop hook for Agent Memory shared by Claude Code and Codex.")
     parser.add_argument("--actor", choices=("codex", "claude"), default="codex")
     parser.add_argument("--protocol", choices=("codex", "claude"), default="codex")
+    parser.add_argument(
+        "--event",
+        choices=("stop-hook", "session-end"),
+        default="stop-hook",
+        help="Host lifecycle event used for closeout attribution and failure behavior.",
+    )
+    parser.add_argument(
+        "--non-blocking",
+        action="store_true",
+        help="Report failures by notification only; required for lifecycle events that cannot block.",
+    )
     parser.add_argument("--auto-closeout", action="store_true")
     parser.add_argument("--timeout", type=int, default=300)
     return parser.parse_args()
@@ -79,7 +90,7 @@ def session_key(payload: dict[str, object], actor: str) -> str:
         value = os.environ.get(key, "").strip()
         if value:
             return value
-    return f"{payload.get('cwd') or actor}|{time.strftime('%Y-%m-%d')}"
+    return ""
 
 
 def run_git(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess[str] | None:
@@ -110,7 +121,7 @@ def normalize_path(repo_path: str) -> Path | None:
         path.relative_to(VAULT_ROOT)
     except ValueError:
         return None
-    if not path.exists() or path.suffix.lower() != ".md":
+    if path.suffix.lower() != ".md" or (path.exists() and not path.is_file()):
         return None
     return path
 
@@ -184,6 +195,7 @@ def unobserved_paths(paths: list[Path]) -> list[Path]:
         try:
             current = file_sha256(path)
         except OSError:
+            stale.append(path)
             continue
         if indexed.get(str(path.resolve())) != current:
             stale.append(path)
@@ -202,7 +214,12 @@ def notify(message: str) -> None:
     subprocess.run(["osascript", "-e", f'display notification "{safe}" with title "Agent memory"'], timeout=5, check=False)
 
 
-def run_closeout(payload: dict[str, object], actor: str, timeout: int) -> dict[str, Any]:
+def run_closeout(
+    payload: dict[str, object],
+    actor: str,
+    timeout: int,
+    trigger: str = "stop-hook",
+) -> dict[str, Any]:
     command = [
         sys.executable,
         str(CLOSEOUT_SCRIPT),
@@ -211,13 +228,15 @@ def run_closeout(payload: dict[str, object], actor: str, timeout: int) -> dict[s
         "--actor",
         actor,
         "--trigger",
-        "stop-hook",
+        trigger,
         "--session-id",
         session_key(payload, actor),
         "--claimed-only",
         "--lock-timeout",
         "60",
     ]
+    if trigger == "session-end":
+        command.append("--skip-audit")
     try:
         completed = subprocess.run(
             command,
@@ -253,9 +272,11 @@ def failure_reason(result: dict[str, Any]) -> str:
     return "; ".join(parts)[:1000] or f"closeout status={result.get('status', 'unknown')}"
 
 
-def report_failure(protocol: str, result: dict[str, Any]) -> int:
+def report_failure(protocol: str, result: dict[str, Any], *, non_blocking: bool = False) -> int:
     reason = failure_reason(result)
     notify(reason[:180])
+    if non_blocking:
+        return 0
     if protocol == "claude":
         print(json.dumps({"decision": "block", "reason": "Memory closeout failed: " + reason}, ensure_ascii=False))
         return 0
@@ -265,6 +286,27 @@ def report_failure(protocol: str, result: dict[str, Any]) -> int:
         file=sys.stderr,
     )
     return 2
+
+
+def stop_hook_reentry(payload: dict[str, object], event: str) -> bool:
+    """Claude sets stop_hook_active after a Stop hook already requested continuation."""
+
+    return event == "stop-hook" and payload.get("stop_hook_active") is True
+
+
+def handle_failure(
+    protocol: str,
+    result: dict[str, Any],
+    *,
+    payload: dict[str, object],
+    event: str,
+    non_blocking: bool,
+) -> int:
+    return report_failure(
+        protocol,
+        result,
+        non_blocking=non_blocking or event == "session-end" or stop_hook_reentry(payload, event),
+    )
 
 
 def run_due_audit() -> None:
@@ -290,13 +332,40 @@ def main() -> int:
     payload = read_payload()
     paths = pending_paths()
     raw_session_id = session_key(payload, args.actor)
-    current_claims = active_claim_rows(raw_session_id, args.actor)
+    current_claims = active_claim_rows(raw_session_id, args.actor, max_age_hours=24)
     if args.auto_closeout and current_claims:
-        result = run_closeout(payload, args.actor, args.timeout)
-        return 0 if result.get("status") == "ok" else report_failure(args.protocol, result)
+        result = run_closeout(payload, args.actor, args.timeout, args.event)
+        return 0 if result.get("status") == "ok" else handle_failure(
+            args.protocol,
+            result,
+            payload=payload,
+            event=args.event,
+            non_blocking=args.non_blocking,
+        )
     if args.auto_closeout and paths:
-        all_claimed_paths = {Path(row["path"]).resolve() for row in all_active_claim_rows(max_age_hours=24)}
+        all_claimed_paths = {
+            Path(row["path"]).resolve()
+            for row in all_active_claim_rows(max_age_hours=24)
+        }
         unclaimed = [path for path in paths if path.resolve() not in all_claimed_paths]
+        if not unclaimed:
+            if args.event != "session-end":
+                run_due_audit()
+            return 0
+        if not raw_session_id:
+            result = {
+                "status": "error",
+                "ownership_error": (
+                    "Claude/Codex hook payload has no session id; refusing an unscoped memory closeout"
+                ),
+            }
+            return handle_failure(
+                args.protocol,
+                result,
+                payload=payload,
+                event=args.event,
+                non_blocking=args.non_blocking,
+            )
         if unclaimed:
             result = {
                 "status": "error",
@@ -306,17 +375,30 @@ def main() -> int:
                 ),
                 "unclaimed_files": [str(path) for path in unclaimed],
             }
-            return report_failure(args.protocol, result)
+            return handle_failure(
+                args.protocol,
+                result,
+                payload=payload,
+                event=args.event,
+                non_blocking=args.non_blocking,
+            )
     if not args.auto_closeout and paths:
         state_mtime = STATE_DB.stat().st_mtime if STATE_DB.exists() else 0
-        if historical_paths() or max(path.stat().st_mtime for path in paths) > state_mtime:
+        path_mtimes: list[float] = []
+        for path in paths:
+            try:
+                path_mtimes.append(path.stat().st_mtime)
+            except OSError:
+                continue
+        if historical_paths() or len(path_mtimes) < len(paths) or max(path_mtimes, default=0) > state_mtime:
             STAMP_ROOT.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha1(session_key(payload, args.actor).encode("utf-8")).hexdigest()[:16]
             stamp = STAMP_ROOT / f"stop-memory-reminded-{args.actor}-{digest}.stamp"
             if not stamp.exists():
                 stamp.write_text(str(int(time.time())), encoding="utf-8")
                 notify(f"{len(paths)} memory files still need closeout.")
-    run_due_audit()
+    if args.event != "session-end":
+        run_due_audit()
     return 0
 
 

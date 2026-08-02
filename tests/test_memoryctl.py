@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import subprocess
 import sys
 import unittest
@@ -59,6 +61,68 @@ class MemoryctlInterpreterTests(unittest.TestCase):
         self.assertEqual(command[0], "/configured/semantic/python")
         self.assertTrue(str(command[1]).endswith("agent_memory_zvec_index.py"))
         self.assertEqual(command[2:], ["--report"])
+
+    def test_agent_closeout_without_session_fails_closed(self) -> None:
+        module = load_memoryctl()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["memoryctl", "--actor", "claude", "closeout", "--dry-run"],
+            ),
+            mock.patch.object(module, "host_session_id", return_value=""),
+            mock.patch.object(module.subprocess, "run") as invoked,
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(module.main(), 2)
+
+        invoked.assert_not_called()
+        self.assertIn("requires an active host session", stderr.getvalue())
+
+    def test_explicit_session_closeout_is_always_claim_scoped(self) -> None:
+        module = load_memoryctl()
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "memoryctl",
+                    "--actor",
+                    "claude",
+                    "closeout",
+                    "--dry-run",
+                    "--session-id",
+                    "explicit-session",
+                ],
+            ),
+            mock.patch.object(module, "host_session_id", return_value=""),
+            mock.patch.object(module.subprocess, "run", return_value=completed) as invoked,
+        ):
+            self.assertEqual(module.main(), 0)
+
+        command = invoked.call_args.args[0]
+        self.assertIn("--session-id", command)
+        self.assertIn("explicit-session", command)
+        self.assertIn("--claimed-only", command)
+
+    def test_global_closeout_requires_explicit_global_flag(self) -> None:
+        module = load_memoryctl()
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["memoryctl", "--actor", "claude", "closeout", "--global", "--dry-run"],
+            ),
+            mock.patch.object(module, "host_session_id", return_value=""),
+            mock.patch.object(module.subprocess, "run", return_value=completed) as invoked,
+        ):
+            self.assertEqual(module.main(), 0)
+
+        command = invoked.call_args.args[0]
+        self.assertNotIn("--claimed-only", command)
 
 
 if __name__ == "__main__":

@@ -120,7 +120,21 @@ def main() -> int:
         global_mode = "--global" in forwarded
         forwarded = [item for item in forwarded if item != "--global"]
         current_session = host_session_id(args.actor)
-        if not global_mode and current_session and "--session-id" not in forwarded:
+        explicit_session = "--session-id" in forwarded
+        if not global_mode and args.command == "closeout" and args.actor in {"codex", "claude"}:
+            if not explicit_session and current_session:
+                forwarded.extend(["--session-id", current_session])
+                explicit_session = True
+            if not explicit_session:
+                print(
+                    "session-scoped closeout requires an active host session or --session-id; "
+                    "use --global only for deliberate vault-wide maintenance",
+                    file=sys.stderr,
+                )
+                return 2
+            if "--claimed-only" not in forwarded:
+                forwarded.append("--claimed-only")
+        elif not global_mode and current_session and not explicit_session:
             forwarded.extend(["--session-id", current_session, "--claimed-only"])
         forwarded.extend(["--actor", args.actor])
         if args.command == "closeout" and not any(

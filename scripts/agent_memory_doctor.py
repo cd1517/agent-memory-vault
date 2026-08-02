@@ -21,7 +21,7 @@ from agent_memory_env import env_value, expand_path, load_config
 from agent_memory_state import absolute_path, secure_sqlite_connect, sqlite_permission_report
 
 
-VERSION = "2.3"
+VERSION = "2.4"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VAULT_ROOT = expand_path(env_value("ROOT", str(REPO_ROOT / "templates" / "vault"))).resolve()
 GIT_ROOT = expand_path(env_value("GIT_ROOT", str(REPO_ROOT))).resolve()
@@ -286,6 +286,55 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def claude_hook_semantics(hooks: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    def command_entries(event: str) -> list[dict[str, Any]]:
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            return []
+        entries: list[dict[str, Any]] = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            entries.extend(item for item in group["hooks"] if isinstance(item, dict))
+        return entries
+
+    stop_entries = command_entries("Stop")
+    session_end_entries = command_entries("SessionEnd")
+    session_start_entries = command_entries("SessionStart")
+    stop_ok = any(
+        "agent_memory_stop_hook.py" in str(item.get("command", ""))
+        and "--actor claude" in str(item.get("command", ""))
+        and "--protocol claude" in str(item.get("command", ""))
+        and "--event stop-hook" in str(item.get("command", ""))
+        and "--non-blocking" not in str(item.get("command", ""))
+        and "--auto-closeout" in str(item.get("command", ""))
+        for item in stop_entries
+    )
+    session_end_ok = any(
+        "agent_memory_stop_hook.py" in str(item.get("command", ""))
+        and "--actor claude" in str(item.get("command", ""))
+        and "--protocol claude" in str(item.get("command", ""))
+        and "--event session-end" in str(item.get("command", ""))
+        and "--non-blocking" in str(item.get("command", ""))
+        and "--auto-closeout" in str(item.get("command", ""))
+        and isinstance(item.get("timeout"), (int, float))
+        and 0 < float(item["timeout"]) <= 60
+        for item in session_end_entries
+    )
+    session_start_ok = any(
+        "agent_memory_session_hook.py" in str(item.get("command", ""))
+        and "--actor claude" in str(item.get("command", ""))
+        and isinstance(item.get("timeout"), (int, float))
+        and 0 < float(item["timeout"]) <= 10
+        for item in session_start_entries
+    )
+    return stop_ok and session_end_ok and session_start_ok, {
+        "stop_scoped_and_blocking": stop_ok,
+        "session_end_non_blocking": session_end_ok,
+        "session_start_bridge": session_start_ok,
+    }
+
+
 def configured_path(name: str) -> Path | None:
     raw = HOST_CONFIG.get(name)
     if not isinstance(raw, str) or not raw.strip():
@@ -314,17 +363,29 @@ def cc_switch_hooks_match(db_path: Path, expected_hooks: dict[str, Any]) -> tupl
             conn.execute("PRAGMA busy_timeout=5000")
             common = conn.execute("SELECT value FROM settings WHERE key = 'common_config_claude'").fetchone()
             backups = conn.execute("SELECT original_config FROM proxy_live_backup WHERE app_type = 'claude'").fetchall()
+            providers = conn.execute(
+                "SELECT settings_config FROM providers WHERE app_type = 'claude'"
+            ).fetchall()
         common_payload = json.loads(str(common[0])) if common else {}
         backup_payloads = [json.loads(str(row[0])) for row in backups]
+        provider_payloads = [json.loads(str(row[0])) for row in providers]
     except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError) as exc:
         return False, {"installed": True, "error": type(exc).__name__}
     common_ok = isinstance(common_payload, dict) and common_payload.get("hooks") == expected_hooks
     backups_ok = all(isinstance(payload, dict) and payload.get("hooks") == expected_hooks for payload in backup_payloads)
-    return common_ok and backups_ok, {
+    provider_hooks = [
+        payload.get("hooks")
+        for payload in provider_payloads
+        if isinstance(payload, dict) and isinstance(payload.get("hooks"), dict)
+    ]
+    provider_hooks_ok = all(claude_hook_semantics(hooks)[0] for hooks in provider_hooks)
+    return common_ok and backups_ok and provider_hooks_ok, {
         "installed": True,
         "common_config_ok": common_ok,
         "backup_count": len(backup_payloads),
         "backups_ok": backups_ok,
+        "provider_hooks_count": len(provider_hooks),
+        "provider_hooks_ok": provider_hooks_ok,
     }
 
 
@@ -828,6 +889,25 @@ def collect_checks(allow_dirty_memory: bool = False) -> list[dict[str, Any]]:
         if claude_settings_path or claude_fragment_path:
             claude_ok = bool(expected_hooks) and claude_settings.get("hooks") == expected_hooks
             add(checks, "claude_stop_hook", "pass" if claude_ok else "warn", "Claude Stop/SessionEnd hooks are configured." if claude_ok else "Claude hooks differ from the managed fragment.")
+            live_hooks = claude_settings.get("hooks") if isinstance(claude_settings.get("hooks"), dict) else {}
+            live_semantics_ok, live_semantics_detail = claude_hook_semantics(live_hooks)
+            fragment_semantics_ok, fragment_semantics_detail = claude_hook_semantics(expected_hooks)
+            semantics_ok = live_semantics_ok and fragment_semantics_ok
+            semantics_detail = {
+                "live": live_semantics_detail,
+                "managed_fragment": fragment_semantics_detail,
+            }
+            add(
+                checks,
+                "claude_hook_semantics",
+                "pass" if semantics_ok else "warn",
+                (
+                    "Claude Stop is scoped and SessionEnd is non-blocking."
+                    if semantics_ok
+                    else "Claude managed hooks have unsafe Stop/SessionEnd lifecycle semantics."
+                ),
+                semantics_detail,
+            )
 
         cc_switch_path = configured_path("cc_switch_db")
         if cc_switch_path:

@@ -22,6 +22,7 @@ from agent_memory_env import env_value, expand_path, load_config
 from agent_memory_lock import try_lock, unlock
 from agent_memory_claim import (
     active_claim_rows,
+    all_active_claim_rows,
     complete_claim_paths,
     parse_deleted_observation,
     record_file_observations,
@@ -1263,23 +1264,39 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         by_path[entry.path] = entry
     discovered_entries = list(by_path.values())
     session_claim_rows = (
-        active_claim_rows(args.session_id, args.actor, read_only=args.dry_run)
+        active_claim_rows(
+            args.session_id,
+            args.actor,
+            read_only=args.dry_run,
+            max_age_hours=24,
+        )
         if args.session_id
         else []
     )
     claim_rows = session_claim_rows if args.claimed_only else []
     claimed_paths = {Path(row["path"]).resolve() for row in claim_rows}
-    unclaimed_entries: list[GitEntry] = []
+    excluded_entries: list[GitEntry] = []
+    truly_unclaimed_entries: list[GitEntry] = []
+    other_session_entries: list[GitEntry] = []
     ownership_error = ""
     if args.claimed_only:
+        active_rows = all_active_claim_rows(max_age_hours=24, read_only=args.dry_run)
+        all_claimed_paths = {Path(row["path"]).resolve() for row in active_rows}
+        excluded_entries = [entry for entry in discovered_entries if entry.path not in claimed_paths]
+        truly_unclaimed_entries = [
+            entry for entry in excluded_entries if entry.path not in all_claimed_paths
+        ]
+        other_session_entries = [
+            entry for entry in excluded_entries if entry.path in all_claimed_paths
+        ]
         if not args.session_id:
             ownership_error = "claimed-only closeout requires --session-id"
-        elif not claimed_paths:
+        elif truly_unclaimed_entries:
             ownership_error = (
-                "no active memory claims for this session; claim each changed file with "
+                f"no active memory claims cover {len(truly_unclaimed_entries)} changed file(s); "
+                "claim each changed file with "
                 f"memoryctl --actor {args.actor} claim --file <path>"
             )
-        unclaimed_entries = [entry for entry in discovered_entries if entry.path not in claimed_paths]
         selected = {entry.path: entry for entry in discovered_entries if entry.path in claimed_paths}
         for path in claimed_paths:
             try:
@@ -1291,8 +1308,10 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
                 GitEntry(status="M" if path.exists() else "D", repo_path=repo_path, path=path),
             )
         all_entries = list(selected.values())
-        if unclaimed_entries:
-            info.append(f"excluded {len(unclaimed_entries)} files owned by other or unclaimed sessions")
+        if other_session_entries:
+            info.append(f"excluded {len(other_session_entries)} files owned by other active sessions")
+        if truly_unclaimed_entries:
+            info.append(f"found {len(truly_unclaimed_entries)} files with no active session claim")
     else:
         all_entries = discovered_entries
 
@@ -1425,7 +1444,7 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
                 break
 
     if args.dry_run:
-        warnings.append("dry_run: no index refresh, zvec refresh, or commit will be written")
+        info.append("dry_run: no index refresh, zvec refresh, or commit will be written")
     if git_entries:
         info.append(
             "git reports dirty Agent Memory files; if some are historical, review dry-run output before committing"
@@ -1556,7 +1575,7 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
     warnings.extend(after_warnings)
     dirty_paths = {entry.path for entry in git_entries}
     unclaimed_history = unobserved_history_entries(
-        [entry for entry in pending_history_entries if entry.path in {item.path for item in unclaimed_entries}]
+        [entry for entry in pending_history_entries if entry.path in {item.path for item in excluded_entries}]
     )
     can_advance_baseline = (
         status == "ok" and not step_failed and intent_step.get("ok")
@@ -1591,7 +1610,8 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         "git_would_observe_through": would_observe_through,
         "changed_files": [entry.repo_path for entry in all_entries],
         "claimed_files": sorted(row["rel_path"] for row in claim_rows),
-        "unclaimed_files": sorted(entry.repo_path for entry in unclaimed_entries),
+        "unclaimed_files": sorted(entry.repo_path for entry in truly_unclaimed_entries),
+        "other_session_files": sorted(entry.repo_path for entry in other_session_entries),
         "processed_files": [relative_to_vault(path) for path in process_files],
         "deleted_files_skipped": [entry.repo_path for entry in deleted_entries],
         "reconcile_findings": reconcile_findings,

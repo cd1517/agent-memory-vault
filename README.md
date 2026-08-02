@@ -120,6 +120,10 @@ python3 scripts/memoryctl --actor claude closeout
 
 写完正式记忆后先 `claim`。认领记录保存在 SQLite，只存 session id 的哈希；Agent 会话内的 closeout 和 Stop Hook 只处理本会话认领的文件，其他会话的脏文件明确排除。成功 closeout 还会记录每个文件的内容 hash，只有具备这份完成证据的历史文件才允许 Git 观察基线跨过。普通事实默认 `agent_scope: shared`；只有宿主特有经验才标为 `codex` 或 `claude`。
 
+当前会话没有 claim、也没有任何待处理正式记忆时，手动 closeout 和 dry-run 都会作为成功的 no-op 退出；如果确实存在无人认领的记忆变更，仍会返回错误并要求先认领，不能用 no-op 绕过归属检查。
+
+Claude 的 `Stop` 和 `SessionEnd` 使用不同生命周期语义：`Stop` 可以在首次真实失败时请求 Claude 继续处理，但检测到 `stop_hook_active=true` 后不得重复阻断；`SessionEnd` 只做 60 秒内的非阻断兜底，不运行周审计，失败只发本机通知。两类运行分别记录为 `trigger=stop-hook` 与 `trigger=session-end`。对 `codex`/`claude` 执行 `memoryctl closeout` 默认必须具备宿主 session 或显式 `--session-id`，只有明确传入 `--global` 才允许全库维护。
+
 异常退出可能留下旧认领。Stop Hook 不会继续信任超过 24 小时的认领，Doctor 会把它列为警告。清理时先预览，再显式应用；这只把 SQLite 账本状态改为 `expired`，不会删除或改写 Markdown：
 
 ```bash

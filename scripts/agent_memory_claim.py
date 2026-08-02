@@ -1172,7 +1172,10 @@ def active_claim_rows(
     actor: str = "",
     *,
     read_only: bool = False,
+    max_age_hours: float | None = None,
 ) -> list[dict[str, str]]:
+    if max_age_hours is not None and max_age_hours <= 0:
+        raise ValueError("max_age_hours must be positive")
     hashed = session_hash(raw_session_id)
     if not hashed:
         return []
@@ -1197,7 +1200,15 @@ def active_claim_rows(
         if read_only and not STATE_DB.exists():
             return []
         raise
-    return [{key: str(row[key] or "") for key in row.keys()} for row in rows]
+    payloads = [{key: str(row[key] or "") for key in row.keys()} for row in rows]
+    if max_age_hours is None:
+        return payloads
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max_age_hours)
+    return [
+        row
+        for row in payloads
+        if (parsed_time(row["updated_at"]) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= cutoff
+    ]
 
 
 def parsed_time(value: str) -> dt.datetime | None:
@@ -1210,18 +1221,28 @@ def parsed_time(value: str) -> dt.datetime | None:
     return parsed.astimezone(dt.timezone.utc)
 
 
-def all_active_claim_rows(max_age_hours: float | None = None) -> list[dict[str, str]]:
+def all_active_claim_rows(
+    max_age_hours: float | None = None,
+    *,
+    read_only: bool = False,
+) -> list[dict[str, str]]:
     if max_age_hours is not None and max_age_hours <= 0:
         raise ValueError("max_age_hours must be positive")
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT session_hash, actor, path, rel_path, status, claimed_at, updated_at, intent_id
-            FROM memory_session_claims
-            WHERE status='active'
-            ORDER BY actor, session_hash, rel_path
-            """
-        ).fetchall()
+    try:
+        with connect(read_only=read_only) as conn:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(memory_session_claims)")}
+            if not columns:
+                return []
+            intent_expression = "intent_id" if "intent_id" in columns else "'' AS intent_id"
+            rows = conn.execute(
+                "SELECT session_hash, actor, path, rel_path, status, claimed_at, updated_at, "
+                f"{intent_expression} FROM memory_session_claims "
+                "WHERE status='active' ORDER BY actor, session_hash, rel_path"
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        if read_only and not STATE_DB.exists():
+            return []
+        raise
     payloads = [{key: str(row[key] or "") for key in row.keys()} for row in rows]
     if max_age_hours is None:
         return payloads

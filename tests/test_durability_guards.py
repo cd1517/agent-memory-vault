@@ -34,6 +34,102 @@ def git(root: Path, *args: str) -> str:
 
 
 class DurabilityGuardTests(unittest.TestCase):
+    def test_doctor_rejects_blocking_session_end_hook(self) -> None:
+        broken = {
+            "Stop": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "agent_memory_stop_hook.py --actor claude --protocol claude "
+                                "--event stop-hook --auto-closeout"
+                            ),
+                            "timeout": 320,
+                        }
+                    ]
+                }
+            ],
+            "SessionEnd": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "agent_memory_stop_hook.py --actor claude --protocol codex "
+                                "--event session-end --auto-closeout"
+                            ),
+                            "timeout": 60,
+                        }
+                    ]
+                }
+            ],
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "agent_memory_session_hook.py --actor claude",
+                            "timeout": 10,
+                        }
+                    ]
+                }
+            ],
+        }
+        healthy, detail = doctor.claude_hook_semantics(broken)
+        self.assertFalse(healthy)
+        self.assertTrue(detail["stop_scoped_and_blocking"])
+        self.assertFalse(detail["session_end_non_blocking"])
+
+    def test_doctor_accepts_nonblocking_session_end_hook(self) -> None:
+        hooks = {
+            "Stop": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "agent_memory_stop_hook.py --actor claude --protocol claude "
+                                "--event stop-hook --auto-closeout"
+                            ),
+                            "timeout": 320,
+                        }
+                    ]
+                }
+            ],
+            "SessionEnd": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "agent_memory_stop_hook.py --actor claude --protocol claude --event session-end "
+                                "--non-blocking --auto-closeout"
+                            ),
+                            "timeout": 60,
+                        }
+                    ]
+                }
+            ],
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "agent_memory_session_hook.py --actor claude",
+                            "timeout": 10,
+                        }
+                    ]
+                }
+            ],
+        }
+        healthy, detail = doctor.claude_hook_semantics(hooks)
+        self.assertTrue(healthy, detail)
+        hooks["Stop"][0]["hooks"][0]["command"] += " --non-blocking"
+        healthy, detail = doctor.claude_hook_semantics(hooks)
+        self.assertFalse(healthy)
+        self.assertFalse(detail["stop_scoped_and_blocking"])
+
     def test_doctor_reports_unobserved_closeout_history(self) -> None:
         pending = closeout.GitEntry(
             status="M",
@@ -192,6 +288,10 @@ class DurabilityGuardTests(unittest.TestCase):
                     )
                     conn.commit()
                 self.assertEqual(claim.all_active_claim_rows(max_age_hours=24), [])
+                self.assertEqual(
+                    claim.active_claim_rows("old-session", "codex", max_age_hours=24),
+                    [],
+                )
                 rows, applied = claim.expire_stale_claims(24, apply=False)
                 self.assertEqual((len(rows), applied), (1, 0))
                 with contextlib.closing(sqlite3.connect(state_db)) as conn, conn:
