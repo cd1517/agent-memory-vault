@@ -146,6 +146,23 @@ python3 scripts/memoryctl --actor human observe-deletion \
   --confirm-user-authorized --apply --json
 ```
 
+如果正文已经由历史会话精确验证并提交，但 closeout 在写入 observation 前中断，后来该 intent 仅因 TTL 到期，可用原始 `intent_id` 恢复已有文件的观察。这个入口不会改正文；它只接受 `user_direct + ALLOW + exact + early_commit` 的完整 intent/receipt 链，要求当前文件等于 `HEAD`，原 proposal commit 仍是该路径最新变更，且目标没有活动 intent、claim 或未提交 Git 状态。命令同样默认预览，`--apply` 才写审计：
+
+```bash
+python3 scripts/memoryctl --actor human observe-committed \
+  --file "/absolute/vault/用户记忆/偏好与边界.md" \
+  --intent-id "32-hex-expired-intent" \
+  --evidence-ref "historical-user-authorization-reference" \
+  --confirm-user-authorized --json
+
+# 核对预览后应用：
+python3 scripts/memoryctl --actor human observe-committed \
+  --file "/absolute/vault/用户记忆/偏好与边界.md" \
+  --intent-id "32-hex-expired-intent" \
+  --evidence-ref "historical-user-authorization-reference" \
+  --confirm-user-authorized --apply --json
+```
+
 搜索示例：
 
 ```bash
