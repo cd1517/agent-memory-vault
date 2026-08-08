@@ -38,6 +38,9 @@ scripts/
   bootstrap.py           # 从模板创建本地私有 vault
   agent_memory_index.py  # 全库 SQLite 索引和搜索
   agent_memory_search.py # 统一搜索入口：SQLite + 可选 Zvec + 手动 rg
+  agent_memory_retrieve.py
+                         # 回读、重验并有界返回正式 Markdown 摘要
+  agent_memory_write.py  # 宿主程序用的 read-target/prepare/apply/cancel 边界
   agent_memory_safety.py # 写入前来源、知识类型和敏感内容闸门
   agent_memory_claim.py  # 会话文件认领账本，防止 Claude/Codex 串提交
   agent_memory_intent.py # 受保护文件的写入意图、审批绑定和不可变回执
@@ -176,6 +179,98 @@ python3 scripts/agent_memory_search.py "复用流程" --memory-type workflow
 python3 scripts/agent_memory_search.py "部署边界" --current-project example-app
 ```
 
+需要给宿主程序注入正式记忆正文时，不要直接相信 SQLite/Zvec 中的摘要，使用只读
+`retrieve` 再次核对当前 Markdown：
+
+```bash
+python3 scripts/memoryctl --actor yichen-content-studio retrieve --json <<'JSON'
+{"schema_version":1,"query":"当前任务","app_id":"yichen-content-studio","project_id":"yichen-content-studio","max_results":5,"max_file_bytes":1048576,"max_total_bytes":4194304,"max_excerpt_bytes":12288}
+JSON
+```
+
+该命令不回显查询原文，只返回 `query_hash`；索引只负责提供候选，每个候选都要重新
+通过 Vault containment/symlink 检查、严格 UTF-8 读取、当前 frontmatter 的
+`status`/`agent_scope`/`app_id`/`project_id` 过滤和敏感内容检查。结果包含相对路径、
+当前文件 SHA-256、`verified_at`、Git HEAD、策略与实时核验提示，以及优先取自
+`## 当前有效摘要` 的有界 excerpt。单文件问题是结构化 warning；Vault 根目录或协议
+参数不安全时才整体失败。Studio actor 固定要求精确
+`app_id=yichen-content-studio`：项目通道传非空 `project_id` 时只接受该精确项目；创作
+通道省略 `project_id`，只接受同 app 的 `global` / `shared` / 未限定记忆。查询只能从
+受控 stdin JSON 进入，不能出现在 argv。读取过程使用 `search --no-log` 等价的只读索引路径，不写
+Markdown、SQLite 或搜索日志。
+
+`yichen-content-studio` 是运行 actor，不是事实断言者。中央入口只允许它调用
+`retrieve`、`write` 和 `version`；低级 `prewrite` / `intent` / `claim` / `closeout` /
+`check` 等全部 fail closed。高级 `write prepare` 仍必须把 `asserted_by` 明确写成
+`user`、`claude`、`codex` 或 `opencode`，不能把应用名冒充信息来源。
+
+### 宿主程序的显式两阶段写入
+
+`write` 是给本地宿主 UI 的高级边界，目前只接受
+`--actor yichen-content-studio`。请求 JSON 只能从 stdin 传入；插件要生成自己的
+`AGENT_MEMORY_SESSION_ID`，不得继承外层 `CODEX_THREAD_ID` 或 Claude 会话 ID，也不能
+用 `--session-id`、等号写法或 argparse 缩写把 session 放进 argv。
+
+构造 `UPDATE` 前必须先用 `read-target` 读取目标的完整当前内容，再在这份
+全文上编辑或追加。不能把 Agent 新回答直接当成整份目标，否则会丢掉
+旧记忆。该读取只接受正式相对 `.md` 路径，使用 containment/symlink、严格
+UTF-8 和 2 MiB 限制，并重新验证 active、shared、app/project scope 与 secret；返回
+`base_exists`、完整 `content`、两种 base hash、`base_git_head` 和会话/目标绑定的
+`read_token`，
+不加写锁、不写 state DB/日志/Markdown：
+
+```bash
+AGENT_MEMORY_SESSION_ID="host-session-id" \
+python3 scripts/memoryctl --actor yichen-content-studio write read-target --json <<'JSON'
+{"schema_version":1,"target_relative_path":"用户记忆/example.md","app_id":"yichen-content-studio"}
+JSON
+```
+
+`prepare` 先做来源安全、查重、目标选择和基线绑定。它会记录不含正文的
+安全审计；只有 `ADD`/`UPDATE` 才会创建私有提案元数据。它绝不修改正式
+Markdown：
+
+```bash
+AGENT_MEMORY_SESSION_ID="host-session-id" \
+python3 scripts/memoryctl --actor yichen-content-studio write prepare --json <<'JSON'
+{"schema_version":1,"summary":"durable preference summary","proposal_markdown":"---\nmemory_type: user_preference\ntrack: user\napp_id: yichen-content-studio\nproject_id: global\nagent_scope: shared\nstatus: active\n---\n\n# Example\n","target_relative_path":"用户记忆/example.md","app_id":"yichen-content-studio","read_token":"<read-target returned 64-hex>","source_class":"user_direct","knowledge_kind":"preference","asserted_by":"user","evidence_ref":"conversation:message-ref"}
+JSON
+```
+
+`prepare` 必须回传同一 session、目标、app/project scope 的 `read_token`。它在全局
+Studio 写锁内重读并比较 `exists`、raw/canonical hash 与 Git HEAD；缺 token 的
+`UPDATE` 和 `ADD` 都拒绝。项目通道还要在 read-target/prepare 请求和 proposal
+frontmatter 中传相同的 `project_id`；创作通道省略请求 `project_id`，proposal 使用
+`global` / `shared` 或未限定项目。新 proposal 必须显式写
+`status: active`、`agent_scope: shared` 和固定 app id。
+
+返回只允许 `ADD` / `UPDATE` / `NOOP` / `MERGE_REQUIRED`。`prepared` 包含不可变的
+`proposal_id`、两种提案 hash、目标、基线和过期时间；`NOOP` 不写，
+`MERGE_REQUIRED` 不创建可写提案，两者都不能被 UI 当成可确认写入。
+
+只有用户明确确认后才能调用 `apply`。宿主必须重传同一版正文、prepare
+返回的 ID/hash/目标，以及一个不含聊天正文的用户确认引用：
+
+```json
+{"schema_version":1,"proposal_id":"<32-hex>","target_relative_path":"用户记忆/example.md","proposal_markdown":"# Example\n","proposal_raw_sha256":"<64-hex>","proposal_canonical_sha256":"<64-hex>","confirmed_by":"user","confirmation_reference":"conversation:confirmed-message-ref"}
+```
+
+`apply` 会在同一把全局锁内重新验证会话、目标、基线、ID 和 hash，再按
+“claim → 原子条件写入 → 本会话 closeout”完成提交。ADD 用同目录 hard link
+做 no-replace 发布；UPDATE 用同文件系统的原子交换先捕获旧目标，再校验被换出的
+raw hash。若捕获的不是准备阶段基线，会先独立保留竞态字节并原子换回；任何无法
+证明恢复完整的二次竞态都返回 `TARGET_WRITE_RECOVERY_REQUIRED`，保留隐藏 sidecar
+供人工恢复，不继续 closeout。当前文件系统不支持安全交换时也 fail closed。
+基线漂移、内容变化或查重冲突会结构化失败，不会静默覆盖。如果精确写入后 closeout 失败，文件保持
+当前会话的认领状态，必须核对后重试。这种状态调用 `cancel` 会返回
+`APPLY_RECOVERY_REQUIRED`，不允许把已改但未收尾的 Markdown 遗留为“已取消”。
+closeout transport 使用独立进程组；超时或宿主中断时先 TERM、等待，再 KILL、等待
+整组消失，确认孙进程不能继续写后才释放 Studio 全局锁。
+
+用户放弃未应用的提案时，向 `cancel` 的 stdin 传入
+`{"schema_version":1,"proposal_id":"<32-hex>"}`。取消不修改 Markdown，同一会话重复取消是
+幂等的。
+
 传入 `--current-project` 后，任何带有非 `global/shared` `project_id` 的记忆都受项目硬边界约束，不论它位于项目、工作流还是决策轨道。确实要借鉴别的项目时，必须再加 `--cross-project`，返回项会标成 `analogy_only`，只能参考，不能据此授权执行动作。没有 `project_id` 的内容按未限定共享参考处理；只有明确写成 `global` 或 `shared` 的内容才是全局共享。
 
 有 `valid_until` 的记忆到期后不会从搜索结果里消失。它仍可能解释历史，但会标成 `time_status: expired` 和 `requires_live_verification: true`；凡是当前状态、费用、账号、权限、外部系统等会变化的事实，都要实时核验后再用。
@@ -312,6 +407,7 @@ python3 scripts/memoryctl --actor codex policy-benchmark \
 11. 原始相似度只负责写入判断，排序分只负责候选顺序；两者不能混用。
 12. 项目事实默认硬隔离；跨项目内容和过期内容都只能作参考，不能直接授权动作。
 13. 高影响文件可启用写入意图，把“批准了哪一版”绑定到目标、会话、提案哈希和最终回执。
+14. 面向宿主注入正文时，索引命中只是候选；必须用只读 retrieve 回读当前 Markdown、重验 frontmatter，并只返回有界摘要和内容指纹。
 
 ## 致谢
 

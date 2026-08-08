@@ -379,6 +379,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           base_raw_sha256 TEXT NOT NULL,
           base_canonical_sha256 TEXT NOT NULL,
           base_git_head TEXT NOT NULL,
+          read_token TEXT NOT NULL DEFAULT '',
+          scope_app_id TEXT NOT NULL DEFAULT '',
+          scope_project_id TEXT NOT NULL DEFAULT '',
           proposal_raw_sha256 TEXT NOT NULL,
           proposal_canonical_sha256 TEXT NOT NULL,
           proposal_size_bytes INTEGER NOT NULL,
@@ -478,6 +481,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "approval_proposal_raw_sha256": "TEXT NOT NULL DEFAULT ''",
         "approval_proposal_canonical_sha256": "TEXT NOT NULL DEFAULT ''",
         "approval_ref_sha256": "TEXT NOT NULL DEFAULT ''",
+        "read_token": "TEXT NOT NULL DEFAULT ''",
+        "scope_app_id": "TEXT NOT NULL DEFAULT ''",
+        "scope_project_id": "TEXT NOT NULL DEFAULT ''",
     }
     for name, declaration in intent_migrations.items():
         _ensure_column(conn, "memory_write_intents", name, declaration)
@@ -766,7 +772,8 @@ def create_intent(
     actor: str,
     raw_session_id: str,
     target: str | Path,
-    proposal_file: str | Path,
+    proposal_file: str | Path | None = None,
+    proposal_text: str | None = None,
     approval_required: bool = True,
     ttl_hours: float | None = None,
     source_class: str = "",
@@ -775,10 +782,43 @@ def create_intent(
     evidence_ref_sha256: str = "",
     reconcile_action: str = "",
     strict_git_base: bool = True,
+    store_proposal_snapshot: bool = True,
+    read_token: str = "",
+    scope_app_id: str = "",
+    scope_project_id: str = "",
+    expected_base_exists: bool | None = None,
+    expected_base_raw_sha256: str = "",
+    expected_base_canonical_sha256: str = "",
+    expected_base_git_head: str = "",
 ) -> dict[str, Any]:
     hashed_session = session_hash(raw_session_id)
     if not hashed_session:
         raise IntentError("SESSION_REQUIRED", "session id is required")
+    if actor == "yichen-content-studio":
+        if not approval_required:
+            raise IntentError(
+                "APPROVAL_REQUIRED",
+                "yichen-content-studio intents always require explicit user approval",
+            )
+        if str(asserted_by).strip().lower() not in {"user", "claude", "codex", "opencode"}:
+            raise IntentError(
+                "ASSERTED_BY_UNSUPPORTED",
+                "yichen-content-studio must bind a supported factual asserter",
+            )
+        if store_proposal_snapshot:
+            raise IntentError(
+                "STUDIO_PROPOSAL_SNAPSHOT_FORBIDDEN",
+                "yichen-content-studio proposal bodies must not be stored in the state database",
+            )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", read_token)
+            or expected_base_exists is None
+            or not scope_app_id.strip()
+        ):
+            raise IntentError(
+                "STUDIO_READ_TOKEN_REQUIRED",
+                "yichen-content-studio intents require a bound high-level read token",
+            )
     canonical = canonical_target(target)
     now_value = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     with connect() as conn:
@@ -792,8 +832,23 @@ def create_intent(
         conn.commit()
     if active is not None:
         raise IntentError("ACTIVE_TARGET_CONFLICT", "another active intent already owns this target")
-    proposal_path = _absolute_lexical(Path(proposal_file))
-    proposal = read_proposal_file(proposal_path)
+    if (proposal_file is None) == (proposal_text is None):
+        raise IntentError(
+            "PROPOSAL_SOURCE_INVALID",
+            "provide exactly one of proposal_file or proposal_text",
+        )
+    if proposal_text is not None:
+        proposal = content_hashes(
+            proposal_text.encode("utf-8"),
+            max_bytes=MAX_PROPOSAL_BYTES,
+        )
+        proposal_source_sha256 = sha256_bytes(
+            f"stdin:{proposal.raw_sha256}".encode("utf-8")
+        )
+    else:
+        proposal_path = _absolute_lexical(Path(proposal_file or ""))
+        proposal = read_proposal_file(proposal_path)
+        proposal_source_sha256 = sha256_bytes(str(proposal_path).encode("utf-8"))
     intent_id = uuid.uuid4().hex
     safety_run_id = f"write-intent:{intent_id}"
     normalized_source = str(source_class).strip().lower()
@@ -827,7 +882,11 @@ def create_intent(
             conn.commit()
         raise IntentError(str(safety["reason_code"]), "proposal content did not pass the source-safety gate")
     canonical_proposal = canonicalize_text(proposal.text)
-    proposal_snapshot, proposal_snapshot_truncated = _snapshot_text(canonical_proposal)
+    if store_proposal_snapshot:
+        proposal_snapshot, proposal_snapshot_truncated = _snapshot_text(canonical_proposal)
+    else:
+        proposal_snapshot = ""
+        proposal_snapshot_truncated = bool(canonical_proposal)
     normalized_reconcile_action = _bounded_label(reconcile_action).upper()
     effective_approval_required = bool(approval_required) or normalized_reconcile_action in {
         "ASK_USER",
@@ -835,6 +894,23 @@ def create_intent(
     }
     base_exists, base = _read_target(canonical)
     base_git_head = current_git_head(required=True)
+
+    def validate_expected_base(
+        observed_exists: bool,
+        observed: ContentDigest,
+        observed_git_head: str,
+    ) -> None:
+        if expected_base_exists is None:
+            return
+        if (
+            bool(expected_base_exists) != bool(observed_exists)
+            or expected_base_raw_sha256 != observed.raw_sha256
+            or expected_base_canonical_sha256 != observed.canonical_sha256
+            or expected_base_git_head != observed_git_head
+        ):
+            raise IntentError("STALE_READ_TOKEN", "target changed after the host read its CAS token")
+
+    validate_expected_base(base_exists, base, base_git_head)
     repo_rel_path = _repo_rel_path(canonical)
     base_blob = _git_blob(base_git_head, repo_rel_path)
     if strict_git_base:
@@ -853,6 +929,21 @@ def create_intent(
         with connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             _expire_active_rows(conn, current=now_value, target_key=canonical.target_key)
+            locked_exists, locked_base = _read_target(canonical)
+            locked_git_head = current_git_head(required=True)
+            validate_expected_base(locked_exists, locked_base, locked_git_head)
+            if strict_git_base:
+                locked_blob = _git_blob(locked_git_head, repo_rel_path)
+                if locked_exists != (locked_blob is not None):
+                    raise IntentError(
+                        "BASE_NOT_AT_GIT_HEAD",
+                        "target must be clean at Git HEAD before creating an intent",
+                    )
+                if locked_blob is not None and sha256_bytes(locked_blob) != locked_base.raw_sha256:
+                    raise IntentError(
+                        "BASE_NOT_AT_GIT_HEAD",
+                        "target has uncommitted changes before intent creation",
+                    )
             active = conn.execute(
                 "SELECT intent_id FROM memory_write_intents WHERE target_key=? "
                 "AND status IN ('pending','approved','bound','validated') LIMIT 1",
@@ -872,6 +963,7 @@ def create_intent(
                 INSERT INTO memory_write_intents (
                   intent_id, actor, session_hash, target_rel_path, target_key,
                   base_exists, base_raw_sha256, base_canonical_sha256, base_git_head,
+                  read_token, scope_app_id, scope_project_id,
                   proposal_raw_sha256, proposal_canonical_sha256, proposal_size_bytes,
                   proposal_path_sha256, proposal_canonical_snapshot,
                   proposal_snapshot_truncated, proposal_line_count,
@@ -880,7 +972,7 @@ def create_intent(
                   safety_reason_code, safety_input_sha256, safety_input_length,
                   reconcile_action, intent_system_enabled, effective_enforcement,
                   approval_required, status, created_at, updated_at, expires_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     intent_id,
@@ -892,10 +984,13 @@ def create_intent(
                     base.raw_sha256,
                     base.canonical_sha256,
                     base_git_head,
+                    _bounded_label(read_token, limit=128),
+                    _bounded_label(scope_app_id, limit=160),
+                    _bounded_label(scope_project_id, limit=160),
                     proposal.raw_sha256,
                     proposal.canonical_sha256,
                     proposal.size_bytes,
-                    sha256_bytes(str(proposal_path).encode("utf-8")),
+                    proposal_source_sha256,
                     proposal_snapshot,
                     int(proposal_snapshot_truncated),
                     _line_count(canonical_proposal),
@@ -1753,10 +1848,14 @@ def protected_deletion_guard(
     }
 
 
-def _session_value(explicit: str) -> str:
+def _session_value(explicit: str, actor: str = "codex") -> str:
     if explicit.strip():
         return explicit.strip()
-    for key in ("AGENT_MEMORY_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+    keys = {
+        "codex": ("AGENT_MEMORY_SESSION_ID", "CODEX_THREAD_ID"),
+        "claude": ("AGENT_MEMORY_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"),
+    }.get(actor, ("AGENT_MEMORY_SESSION_ID",))
+    for key in keys:
         value = os.environ.get(key, "").strip()
         if value:
             return value
@@ -1765,7 +1864,11 @@ def _session_value(explicit: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create and verify Agent Memory write intents and receipts.")
-    parser.add_argument("--actor", choices=("codex", "claude", "human", "migration", "test"), default="codex")
+    parser.add_argument(
+        "--actor",
+        choices=("codex", "claude", "human", "migration", "test", "yichen-content-studio"),
+        default="codex",
+    )
     parser.add_argument("--session-id", default="")
     parser.add_argument("--json", action="store_true")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1825,9 +1928,24 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    raw_session_id = _session_value(args.session_id)
+    raw_session_id = _session_value(args.session_id, args.actor)
     try:
+        if args.actor == "yichen-content-studio" and args.action == "create":
+            raise IntentError(
+                "STUDIO_LOW_LEVEL_API_FORBIDDEN",
+                "yichen-content-studio must use the high-level write prepare/apply protocol",
+            )
         if args.action == "create":
+            if args.actor == "yichen-content-studio" and args.asserted_by not in {
+                "user",
+                "claude",
+                "codex",
+                "opencode",
+            }:
+                raise IntentError(
+                    "ASSERTED_BY_UNSUPPORTED",
+                    "yichen-content-studio must identify the factual asserter as user, claude, codex, or opencode",
+                )
             payload: Any = create_intent(
                 actor=args.actor,
                 raw_session_id=raw_session_id,

@@ -16,6 +16,88 @@ INSTALLER = REPO_ROOT / "scripts" / "install_runtime.py"
 
 
 class RuntimeInstallTests(unittest.TestCase):
+    def test_installed_runtime_can_retrieve_revalidated_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root).resolve()
+            runtime = root / "runtime"
+            vault = root / "vault"
+            memory = vault / "项目" / "example.md"
+            memory.parent.mkdir(parents=True)
+            memory.write_text(
+                "---\n"
+                "memory_type: project\n"
+                "track: project\n"
+                "app_id: yichen-content-studio\n"
+                "project_id: example-app\n"
+                "status: active\n"
+                "agent_scope: shared\n"
+                "verified_at: 2026-08-08\n"
+                "---\n\n"
+                "# Example\n\n"
+                "runtimeprobe\n\n"
+                "## 当前有效摘要\n\n"
+                "Installed runtime retrieval works.\n",
+                encoding="utf-8",
+            )
+            installed = subprocess.run(
+                [sys.executable, str(INSTALLER), "--config-root", str(runtime), "--json"],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            config = runtime / "config" / "agent-memory.toml"
+            config.write_text(
+                f'memory_root = "{vault}"\n'
+                f'git_root = "{vault}"\n'
+                f'state_db = "{runtime / "state.sqlite"}"\n',
+                encoding="utf-8",
+            )
+            if os.name != "nt":
+                config.chmod(0o600)
+            indexed = subprocess.run(
+                [sys.executable, str(runtime / "scripts" / "agent_memory_index.py"), "--init", "--scan"],
+                cwd=runtime,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(indexed.returncode, 0, indexed.stdout + indexed.stderr)
+            private_query = "runtimeprobe"
+            retrieve_command = [
+                sys.executable,
+                str(runtime / "scripts" / "memoryctl"),
+                "--actor",
+                "yichen-content-studio",
+                "retrieve",
+                "--json",
+            ]
+            self.assertNotIn(private_query, retrieve_command)
+            retrieved = subprocess.run(
+                retrieve_command,
+                cwd=runtime,
+                input=json.dumps(
+                    {
+                        "schema_version": 1,
+                        "query": private_query,
+                        "app_id": "yichen-content-studio",
+                        "project_id": "example-app",
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(retrieved.returncode, 0, retrieved.stdout + retrieved.stderr)
+            payload = json.loads(retrieved.stdout)
+            self.assertEqual(payload["result_count"], 1)
+            self.assertEqual(payload["results"][0]["relative_path"], "项目/example.md")
+            self.assertEqual(payload["results"][0]["excerpt"], "Installed runtime retrieval works.")
+
     def test_install_is_idempotent_and_preserves_local_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root).resolve()
@@ -43,6 +125,8 @@ class RuntimeInstallTests(unittest.TestCase):
             self.assertTrue((root / "benchmarks" / "public-policy-safety.json").is_file())
             self.assertTrue((root / "scripts" / "agent_memory_safety.py").is_file())
             self.assertTrue((root / "scripts" / "agent_memory_policy_benchmark.py").is_file())
+            self.assertTrue((root / "scripts" / "agent_memory_retrieve.py").is_file())
+            self.assertTrue((root / "scripts" / "agent_memory_write.py").is_file())
             self.assertTrue((root / "scripts" / "agent_memory_state.py").is_file())
             self.assertTrue((root / "scripts" / "agent_memory_lock.py").is_file())
             self.assertTrue((root / "scripts" / "install-windows.ps1").is_file())

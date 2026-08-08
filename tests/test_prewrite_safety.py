@@ -19,6 +19,47 @@ from agent_memory_check import scan_for_secrets
 from agent_memory_safety import assess_source
 
 
+class SummaryExtractionTests(unittest.TestCase):
+    def test_current_summary_uses_only_section_body(self) -> None:
+        text = (
+            "# Example\n\n"
+            "## 当前有效摘要\n\n"
+            "Only this durable fact belongs in the search summary.\n\n"
+            "## Open loops\n\n"
+            "This section must not affect duplicate detection.\n"
+        )
+
+        summary = closeout.summary_from_text(text)
+
+        self.assertEqual(summary, "Only this durable fact belongs in the search summary.")
+        self.assertNotIn("当前有效摘要", summary)
+        self.assertNotIn("Open loops", summary)
+
+
+class PrivateSearchTransportTests(unittest.TestCase):
+    def test_reconcile_query_is_stdin_only_and_never_child_argv(self) -> None:
+        private_summary = "private-summary-argv-probe-94731"
+        result = {
+            "ok": True,
+            "returncode": 0,
+            "stdout": '{"results":[],"warnings":[]}',
+            "stderr": "",
+        }
+        with mock.patch.object(closeout, "run_command", return_value=result) as invoked:
+            rows, warnings = closeout.search_memory(
+                private_summary,
+                read_only=True,
+                app_id="yichen-content-studio",
+                agent_scope="shared",
+            )
+        self.assertEqual(rows, [])
+        self.assertEqual(warnings, [])
+        command = invoked.call_args.args[0]
+        self.assertNotIn(private_summary, command)
+        self.assertIn("--query-stdin", command)
+        self.assertEqual(invoked.call_args.kwargs["input_text"], private_summary)
+
+
 class RawSemanticDistanceTests(unittest.TestCase):
     def test_rank_adjustment_cannot_turn_far_result_into_merge(self) -> None:
         row = {

@@ -58,6 +58,16 @@ python3 scripts/memoryctl --actor <codex|claude> claim \
 
 Codex 会自动使用 `CODEX_THREAD_ID`；Claude Code 必须通过 `SessionStart` 运行 `agent_memory_session_hook.py --actor claude`，把官方 Hook payload 的真实 `session_id` 写入 `CLAUDE_ENV_FILE`，供后续 Bash 命令使用。Stop Hook 只处理当前会话认领的文件，其他会话的脏文件会明确排除；成功 closeout 会另存文件内容 hash，只有匹配这份完成指纹的历史内容才视为已处理。
 
+宿主 UI 不能直接绕过上述流程写 Markdown。对 `yichen-content-studio` 必须使用
+`memoryctl --actor yichen-content-studio write read-target|prepare|apply|cancel --json`，请求只经 stdin
+传入，并且只使用宿主自己的 `AGENT_MEMORY_SESSION_ID`。UPDATE 先用
+`read-target` 读完整当前文件，再在全文上生成最终版，不能用 Agent 的一段
+新回答覆盖旧文件。`prepare` 不改正式
+Markdown；`apply` 必须携带同一提案 ID/hash/目标和明确用户确认 reference；
+`NOOP` 不写，`MERGE_REQUIRED` 必须回到 UI 由用户选择，不能静默覆盖。
+若 apply 返回 `TARGET_WRITE_RECOVERY_REQUIRED`，目标目录中可能保留含完整正文的
+隐藏恢复 sidecar；必须人工核对并保留现场，不能自动删除、提交或继续重试。
+
 重要任务结束前执行 memory closeout：
 
 ```bash

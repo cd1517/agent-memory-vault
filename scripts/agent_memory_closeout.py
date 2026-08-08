@@ -150,6 +150,7 @@ def run_command(
     command: list[str],
     timeout: int = 120,
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
 ) -> dict[str, Any]:
     command_env = os.environ.copy() if env is None else env.copy()
     command_env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -163,6 +164,7 @@ def run_command(
             encoding="utf-8",
             errors="replace",
             capture_output=True,
+            input=input_text,
             timeout=timeout,
             env=command_env,
             check=False,
@@ -428,7 +430,12 @@ def summary_from_text(text: str) -> str:
             return stripped.split(":", 1)[1].strip().strip('"')
     current_summary = text.find("## 当前有效摘要")
     if current_summary != -1:
-        return text[current_summary : current_summary + 500].replace("\n", " ")
+        section = text[current_summary + len("## 当前有效摘要") :]
+        next_heading = re.search(r"\n##\s+", section)
+        if next_heading is not None:
+            section = section[: next_heading.start()]
+        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        return " ".join(lines)[:500]
     body = without_frontmatter(text)
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     return " ".join(lines[:8])[:700]
@@ -518,15 +525,29 @@ def search_memory(
     no_zvec: bool = True,
     current_project: str = "",
     read_only: bool = False,
+    app_id: str = "",
+    agent_scope: str = "",
+    project_id: str = "",
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    command = [PYTHON, str(SEARCH_SCRIPT), query, "--limit", str(limit), "--json"]
+    command = [PYTHON, str(SEARCH_SCRIPT), "--query-stdin", "--limit", str(limit), "--json"]
     if no_zvec:
         command.append("--no-zvec")
     if current_project.strip():
         command.extend(["--current-project", current_project.strip()])
+    if app_id.strip():
+        command.extend(["--app-id", app_id.strip()])
+    if agent_scope.strip():
+        command.extend(["--agent-scope", agent_scope.strip()])
+    if project_id.strip():
+        command.extend(["--project-id", project_id.strip()])
     if read_only:
         command.append("--no-log")
-    result = run_command(command, timeout=80, env=command_env_offline())
+    result = run_command(
+        command,
+        timeout=80,
+        env=command_env_offline(),
+        input_text=query,
+    )
     if not result["ok"]:
         return [], [f"search failed: {str(result['stderr']).strip() or result['returncode']}"]
     try:
@@ -1733,6 +1754,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audit-timeout", type=int, default=180, help="Seconds before closeout piggyback audit times out.")
     args = parser.parse_args()
     args.actor = normalized_actor(args.actor)
+    if args.actor == "yichen-content-studio":
+        if args.session_id:
+            parser.error("yichen-content-studio session id must be supplied through AGENT_MEMORY_SESSION_ID")
+        args.session_id = os.environ.get("AGENT_MEMORY_SESSION_ID", "").strip()
     args.limit = max(args.limit, 1)
     args.audit_interval_days = max(args.audit_interval_days, 1)
     args.audit_limit = max(args.audit_limit, 1)

@@ -100,6 +100,64 @@ status: active
 3. 表达模糊时，可以启用 Zvec 做语义候选召回。
 4. Zvec 命中的 chunk 只作为候选，最终仍然回读 Markdown 原文。
 
+### Canonical read boundary
+
+`agent_memory_retrieve.py` 是“候选召回”和“把正文交给宿主”之间的只读边界。它调用
+统一搜索的 `--no-log` 路径缩小候选，但不信任候选中的绝对路径、摘要、hash 或
+frontmatter。每个候选都通过 `agent_memory_intent.canonical_target` 的同一套 containment
+与 symlink 规则，随后以严格 UTF-8 重新读取当前 Markdown，并再次应用 active、
+agent scope、app 和 project 过滤。
+
+对 `yichen-content-studio`，app id 是 Runtime 固定的中央边界而不是可选筛选器。项目
+请求只返回精确项目；省略项目的创作请求只返回同 app 的 global/shared/unscoped
+内容。该 actor 的查询只从 stdin JSON 进入，中央 `memoryctl` 不接受 argv query，且
+只暴露 `retrieve`、`write`、`version`。
+
+输出只保留相对路径、当前内容 hash、验证/时效策略、Git HEAD 和有字节上限的 excerpt；
+查询只保留规范化 SHA-256。单个 stale/missing/oversized/invalid 候选不会拖垮整次读取，
+而是成为不含绝对路径和正文的结构化 warning。Vault 根目录不可用或参数协议不安全才
+fail closed。该入口不迁移 SQLite schema、不写搜索日志，也不修改 Markdown。
+
+### Canonical host write boundary
+
+`agent_memory_write.py` 把宿主 UI 的正式记忆写入压成 `read-target` /
+`prepare` / `apply` / `cancel` 状态转换。请求正文只经 stdin 进入进程，全路径按
+`yichen-content-studio` 独立 session 授权，不接受 Codex 或 Claude 宿主会话回退；
+session 只从 `AGENT_MEMORY_SESSION_ID` 环境变量读取，中央 wrapper 和子命令 parser
+都拒绝显式 session argv 与 argparse 长选项缩写。
+
+`read-target` 用 canonical target 边界严格读取不超过 2 MiB 的 UTF-8 Markdown，
+先按当前 frontmatter 复核 active/shared/app/project 与 secret，再返回完整正文、当前
+raw/canonical hash、Git HEAD、base existence 和 session/target/scope 绑定的 opaque
+read token。它不取全局写锁，也不写 state DB、
+日志或 Vault。`UPDATE` 必须在这份全文上生成完整最终版；不能用一段
+Agent 回答代替旧文件。
+
+`prepare` 必须带回该 read token；缺 token 或 read 后发生的内容、存在性、scope、Git
+HEAD 漂移都会在 Studio 写锁内作为 stale CAS 拒绝，ADD 的 missing token 也不能抢占
+后来创建的文件。随后它先过 source safety，再从只读、不记录查询且 query 只走 stdin
+的检索路径取候选，并用
+canonical target 规则重新读取目标。它最多生成一个绑定 session、目标、Git
+基线、read token、app/project scope 和提案 hash 的 intent，不改 Markdown。proposal
+必须显式为 active、shared、固定 app，项目声明必须与通道一致。`NOOP` 和 `MERGE_REQUIRED` 不生成
+可 apply 的 ID。
+
+`apply` 必须带回同一 ID、目标、两种 hash、完整提案和显式用户确认
+reference。它在全局文件锁下再次验证当前基线和意图状态，然后按
+`claim → atomic conditional write → session-scoped closeout` 执行。ADD 通过同目录
+hard link 提供 no-replace 语义；UPDATE 通过 `renamex_np(RENAME_SWAP)`（macOS）或
+`renameat2(RENAME_EXCHANGE)`（Linux）原子交换目标与提案，然后校验被换出的旧字节。
+旧字节不等于准备基线时，先创建独立恢复副本再原子换回。只有目标和返回的提案都
+精确通过 hash 校验才清理临时文件并返回普通竞态失败；二次竞态、崩溃遗留或文件系统
+不支持安全 primitive 时一律 fail closed，保留恢复 sidecar，且不进入 closeout。
+任一绑定变化也会 fail closed；写入后收尾失败则保留认领与现场，不用旧正文静默回滚覆盖。
+此时 `cancel` 会先比对目标与 base；只有完全未写时才可取消并释放 claim，
+已等于 proposal 或发生其他变化时返回 `APPLY_RECOVERY_REQUIRED`。
+
+apply 派生的 closeout transport 单独创建 process group。timeout、取消或宿主 shutdown
+都执行 TERM → bounded wait → KILL → reap，并等到整个 group 消失后才让外层 Studio
+写锁释放，避免遗留的 Git/index/Zvec 孙进程晚到写入。
+
 ## 7. Closeout and audit loop
 
 closeout 是每次任务结束后的自动整理员。它不替 Agent 判断“什么值得记”，但会把收尾动作压成稳定流程：

@@ -74,6 +74,8 @@ REQUIRED_LOCAL_FILES = [
     SCRIPT_ROOT / "agent_memory_zvec_index.py",
     SCRIPT_ROOT / "agent_memory_policy_benchmark.py",
     SCRIPT_ROOT / "agent_memory_retrieval_benchmark.py",
+    SCRIPT_ROOT / "agent_memory_retrieve.py",
+    SCRIPT_ROOT / "agent_memory_write.py",
     SCRIPT_ROOT / "agent_memory_doctor.py",
     SCRIPT_ROOT / "agent_memory_decision_outcomes.py",
     SCRIPT_ROOT / "agent_memory_session_hook.py",

@@ -744,6 +744,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified Agent Memory search: SQLite FTS plus optional Zvec semantic results.")
     parser.add_argument("query", nargs="?", help="Search query.")
     parser.add_argument("--search", dest="search", help="Search query, alternative to positional query.")
+    parser.add_argument(
+        "--query-stdin",
+        action="store_true",
+        help="Read a private UTF-8 query from stdin so it never appears in process argv.",
+    )
     parser.add_argument("--limit", type=int, default=5, help="Maximum merged results.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     parser.add_argument("--no-zvec", action="store_true", help="Skip semantic Zvec search.")
@@ -786,7 +791,18 @@ def parse_args() -> argparse.Namespace:
         help="Irreversibly redact legacy raw search queries while retaining hashes and lengths.",
     )
     args = parser.parse_args()
-    args.query = args.search or args.query
+    if args.query_stdin:
+        if args.search or args.query:
+            parser.error("--query-stdin cannot be combined with an argv query")
+        payload = sys.stdin.buffer.read(64 * 1024 + 1)
+        if len(payload) > 64 * 1024:
+            parser.error("stdin query is too large")
+        try:
+            args.query = payload.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError:
+            parser.error("stdin query must be UTF-8")
+    else:
+        args.query = args.search or args.query
     if not args.query and not args.redact_legacy_logs:
         parser.error("query is required")
     if args.cross_project and not args.current_project:

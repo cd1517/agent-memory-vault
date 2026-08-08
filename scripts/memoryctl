@@ -14,6 +14,8 @@ from agent_memory_env import env_value, expand_path
 SCRIPT_ROOT = Path(__file__).resolve().parent
 COMMANDS = {
     "search": SCRIPT_ROOT / "agent_memory_search.py",
+    "retrieve": SCRIPT_ROOT / "agent_memory_retrieve.py",
+    "write": SCRIPT_ROOT / "agent_memory_write.py",
     "closeout": SCRIPT_ROOT / "agent_memory_closeout.py",
     "audit": SCRIPT_ROOT / "agent_memory_audit.py",
     "audit-autorun": SCRIPT_ROOT / "agent_memory_audit_autorun.py",
@@ -30,12 +32,15 @@ COMMANDS = {
     "policy-benchmark": SCRIPT_ROOT / "agent_memory_policy_benchmark.py",
     "intent": SCRIPT_ROOT / "agent_memory_intent.py",
 }
+STUDIO_ACTOR = "yichen-content-studio"
+STUDIO_COMMANDS = {"retrieve", "write", "version"}
 
 
 def host_session_id(actor: str) -> str:
     keys = {
         "codex": ("AGENT_MEMORY_SESSION_ID", "CODEX_THREAD_ID"),
         "claude": ("AGENT_MEMORY_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"),
+        "yichen-content-studio": ("AGENT_MEMORY_SESSION_ID",),
     }.get(actor, ("AGENT_MEMORY_SESSION_ID",))
     for key in keys:
         value = os.environ.get(key, "").strip()
@@ -45,10 +50,13 @@ def host_session_id(actor: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Platform-neutral Agent Memory Vault entrypoint.")
+    parser = argparse.ArgumentParser(
+        description="Platform-neutral Agent Memory Vault entrypoint.",
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "--actor",
-        choices=("codex", "claude", "human", "migration", "test"),
+        choices=("codex", "claude", "human", "migration", "test", "yichen-content-studio"),
         default=os.environ.get("MEMORY_ACTOR", "codex"),
     )
     parser.add_argument("command", choices=(*COMMANDS.keys(), "prewrite", "version"))
@@ -58,6 +66,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.actor == STUDIO_ACTOR and args.command not in STUDIO_COMMANDS:
+        print(
+            "yichen-content-studio may use only retrieve, write, or version",
+            file=sys.stderr,
+        )
+        return 2
     if args.command == "version":
         config_root = expand_path(env_value("CONFIG_ROOT", "$HOME/.config/agent-memory"))
         manifest_path = config_root / "config" / "runtime-manifest.json"
@@ -80,10 +94,42 @@ def main() -> int:
     forwarded = list(args.args)
     if forwarded and forwarded[0] == "--":
         forwarded = forwarded[1:]
+    if args.actor == STUDIO_ACTOR and args.command == "retrieve":
+        # The private query and its scope are accepted only as controlled JSON
+        # on stdin.  Keeping the wrapper argv fixed also makes accidental query
+        # leakage observable and fail closed before a child is started.
+        if any(item != "--json" for item in forwarded):
+            print(
+                "yichen-content-studio retrieve accepts request JSON on stdin only",
+                file=sys.stderr,
+            )
+            return 2
+        forwarded = ["--json"]
     if args.command == "prewrite":
         if not forwarded:
             print("prewrite requires a memory summary", file=sys.stderr)
             return 2
+        if args.actor == "yichen-content-studio":
+            asserted_values = [
+                forwarded[index + 1]
+                for index, item in enumerate(forwarded)
+                if item == "--asserted-by" and index + 1 < len(forwarded)
+            ]
+            if len(asserted_values) != 1:
+                print(
+                    "yichen-content-studio prewrite requires --asserted-by "
+                    "user|claude|codex|opencode; actor and factual asserter are separate",
+                    file=sys.stderr,
+                )
+                return 2
+            asserted_by = asserted_values[0]
+            if asserted_by not in {"user", "claude", "codex", "opencode"}:
+                print(
+                    "unsupported --asserted-by for yichen-content-studio; "
+                    "use user|claude|codex|opencode",
+                    file=sys.stderr,
+                )
+                return 2
         forwarded = ["--prewrite", forwarded[0], *forwarded[1:]]
     elif args.command in {"claim", "claims", "claims-expire", "observe-deletion", "observe-committed"}:
         action = {
@@ -116,12 +162,65 @@ def main() -> int:
             forwarded = [item for item in forwarded if item != "--json"]
             global_options.append("--json")
         forwarded = [*global_options, *forwarded]
+    elif args.command == "retrieve":
+        forwarded = ["--actor", args.actor, *forwarded]
+    elif args.command == "write":
+        current_session = host_session_id(args.actor)
+        global_options = ["--actor", args.actor]
+        if args.actor == STUDIO_ACTOR:
+            # Keep the child argv to a small, non-private grammar.  In
+            # particular, reject both ``--session-id=value`` and argparse-style
+            # abbreviations such as ``--session`` before a child process is
+            # created.  The Studio session exists only in the inherited private
+            # environment.
+            if any(item.startswith("--session") for item in forwarded):
+                print(
+                    "yichen-content-studio write takes its private session from the environment only",
+                    file=sys.stderr,
+                )
+                return 2
+            if not forwarded or forwarded[0] not in {"read-target", "prepare", "apply", "cancel"}:
+                print("yichen-content-studio write action is invalid", file=sys.stderr)
+                return 2
+            normalized: list[str] = [forwarded[0]]
+            index = 1
+            while index < len(forwarded):
+                item = forwarded[index]
+                if item == "--json":
+                    if item not in normalized:
+                        normalized.append(item)
+                elif item in {"--lock-timeout", "--closeout-timeout"}:
+                    if index + 1 >= len(forwarded):
+                        print("yichen-content-studio write option is incomplete", file=sys.stderr)
+                        return 2
+                    normalized.extend([item, forwarded[index + 1]])
+                    index += 1
+                elif item.startswith("--lock-timeout=") or item.startswith("--closeout-timeout="):
+                    normalized.append(item)
+                else:
+                    print(
+                        "yichen-content-studio write accepts only controlled non-private options",
+                        file=sys.stderr,
+                    )
+                    return 2
+                index += 1
+            forwarded = normalized
+        if args.actor != STUDIO_ACTOR and current_session and "--session-id" not in forwarded:
+            global_options.extend(["--session-id", current_session])
+        if "--json" in forwarded:
+            forwarded = [item for item in forwarded if item != "--json"]
+            global_options.append("--json")
+        forwarded = [*global_options, *forwarded]
     if command_name == "closeout":
         global_mode = "--global" in forwarded
         forwarded = [item for item in forwarded if item != "--global"]
         current_session = host_session_id(args.actor)
         explicit_session = "--session-id" in forwarded
-        if not global_mode and args.command == "closeout" and args.actor in {"codex", "claude"}:
+        if not global_mode and args.command == "closeout" and args.actor in {
+            "codex",
+            "claude",
+            "yichen-content-studio",
+        }:
             if not explicit_session and current_session:
                 forwarded.extend(["--session-id", current_session])
                 explicit_session = True
@@ -141,8 +240,14 @@ def main() -> int:
             flag in forwarded for flag in ("--commit", "--dry-run", "--prewrite")
         ):
             forwarded.append("--commit")
-    elif command_name == "search" and args.actor in {"codex", "claude"} and "--agent-scope" not in forwarded:
-        forwarded.extend(["--agent-scope", args.actor])
+    elif (
+        command_name == "search"
+        and args.actor in {"codex", "claude", "yichen-content-studio"}
+        and "--agent-scope" not in forwarded
+    ):
+        forwarded.extend(
+            ["--agent-scope", args.actor if args.actor in {"codex", "claude"} else "shared"]
+        )
     env = os.environ.copy()
     env["MEMORY_ACTOR"] = args.actor
     env.setdefault("PYTHONIOENCODING", "utf-8")

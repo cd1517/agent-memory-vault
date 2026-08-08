@@ -45,6 +45,7 @@ ACTOR_SESSION_ENV_KEYS = {
     "human": ("AGENT_MEMORY_SESSION_ID",),
     "migration": ("AGENT_MEMORY_SESSION_ID",),
     "test": ("AGENT_MEMORY_SESSION_ID",),
+    "yichen-content-studio": ("AGENT_MEMORY_SESSION_ID",),
 }
 
 
@@ -1302,7 +1303,11 @@ def complete_claim_paths(raw_session_id: str, actor: str, paths: list[Path]) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Track per-session ownership of shared memory files.")
-    parser.add_argument("--actor", choices=("codex", "claude", "human", "migration", "test"), default="codex")
+    parser.add_argument(
+        "--actor",
+        choices=("codex", "claude", "human", "migration", "test", "yichen-content-studio"),
+        default="codex",
+    )
     parser.add_argument("--session-id", default="")
     parser.add_argument("--json", action="store_true")
     subparsers = parser.add_subparsers(dest="action", required=True)
