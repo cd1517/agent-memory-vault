@@ -380,7 +380,7 @@ def explicit_entries(paths: list[str]) -> tuple[list[GitEntry], list[str]]:
         else:
             path = path.resolve()
         try:
-            repo_path = str(path.relative_to(REPO_ROOT))
+            repo_path = path.relative_to(REPO_ROOT).as_posix()
         except ValueError:
             warnings.append(f"changed file outside repo skipped: {path}")
             continue
@@ -394,7 +394,7 @@ def explicit_entries(paths: list[str]) -> tuple[list[GitEntry], list[str]]:
 
 def relative_to_vault(path: Path) -> str:
     try:
-        return str(path.relative_to(VAULT_ROOT))
+        return path.relative_to(VAULT_ROOT).as_posix()
     except ValueError:
         return str(path)
 
@@ -922,10 +922,11 @@ def _hash_object_bytes(data: bytes) -> tuple[bool, str]:
     return completed.returncode == 0 and bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", object_id)), object_id
 
 
-def bind_checked_file_hashes(files: list[Path]) -> dict[Path, str]:
-    """Bind every closeout file to the bytes presented for checking."""
+def bind_checked_file_hashes(files: list[Path]) -> tuple[dict[Path, str], dict[str, str]]:
+    """Bind each closeout file to raw and canonical hashes from one read."""
 
     bound: dict[Path, str] = {}
+    canonical_bound: dict[str, str] = {}
     for raw_path in files:
         candidate = raw_path.expanduser()
         if not candidate.is_absolute():
@@ -933,22 +934,32 @@ def bind_checked_file_hashes(files: list[Path]) -> dict[Path, str]:
         if candidate.is_symlink():
             raise OSError(f"symlink target rejected: {candidate}")
         path = candidate.resolve()
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = os.open(path, flags)
         try:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
                 raise OSError(f"not a regular file: {path}")
             digest = hashlib.sha256()
+            payload = bytearray()
             while True:
                 block = os.read(descriptor, 1024 * 1024)
                 if not block:
                     break
                 digest.update(block)
+                payload.extend(block)
         finally:
             os.close(descriptor)
         bound[path] = digest.hexdigest()
-    return bound
+        canonical_bound[os.path.normcase(str(path))] = write_intent.content_hashes(
+            bytes(payload)
+        ).canonical_sha256
+    return bound, canonical_bound
 
 
 def _snapshot_commit_files(
@@ -1443,12 +1454,15 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
 
     preflight_error = ownership_error or intent_error
     checked_commit_hashes: dict[Path, str] = {}
+    checked_canonical_hashes: dict[str, str] = {}
     if process_files and not preflight_error:
         try:
             # Bind all ordinary and protected files before validation checks;
             # the isolated snapshot below must still contain these bytes.
-            checked_commit_hashes = bind_checked_file_hashes(process_files)
-        except OSError:
+            checked_commit_hashes, checked_canonical_hashes = bind_checked_file_hashes(
+                process_files
+            )
+        except (OSError, write_intent.IntentError):
             preflight_error = "CHECK_INPUT_BIND_FAILED"
 
     if not preflight_error:
@@ -1457,10 +1471,11 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             intent_id = str(validation.get("intent_id", ""))
             claim_path = claim_path_by_intent.get(intent_id)
-            final_digest = str(validation.get("final_raw_sha256", "")).strip().lower()
-            if claim_path is None or not final_digest:
+            final_canonical = str(validation.get("final_canonical_sha256", "")).strip().lower()
+            if claim_path is None or not final_canonical:
                 continue
-            if checked_commit_hashes.get(claim_path.resolve()) != final_digest:
+            checked_key = os.path.normcase(str(claim_path.resolve()))
+            if checked_canonical_hashes.get(checked_key) != final_canonical:
                 preflight_error = "VALIDATED_CONTENT_CHANGED"
                 break
 
@@ -1514,6 +1529,16 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         status = "warning"
 
     commit_step: dict[str, Any]
+    early_commit_paths = {
+        claim_path_by_intent[str(validation.get("intent_id", ""))].resolve()
+        for validation in intent_validations
+        if validation.get("ok")
+        and validation.get("early_commit")
+        and str(validation.get("intent_id", "")) in claim_path_by_intent
+    }
+    commit_process_files = [
+        path for path in process_files if path.resolve() not in early_commit_paths
+    ]
     if status == "error":
         commit_step = {"ok": False, "skipped": True, "detail": "skipped_due_to_error"}
     elif blocking_reconcile and not args.commit_warnings:
@@ -1522,7 +1547,7 @@ def run_closeout(args: argparse.Namespace) -> dict[str, Any]:
         commit_step = {"ok": True, "skipped": True, "detail": "skipped_due_to_warning"}
     else:
         commit_step = commit_files(
-            process_files,
+            commit_process_files,
             args,
             expected_raw_sha256=checked_commit_hashes,
             expected_head=git_head_before,

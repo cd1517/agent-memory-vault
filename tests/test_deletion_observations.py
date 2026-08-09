@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -73,10 +74,10 @@ class DeletionObservationCommandTests(unittest.TestCase):
         config_path.write_text(
             "\n".join(
                 (
-                    f'memory_root = "{self.vault}"',
-                    f'git_root = "{self.git_root}"',
-                    f'config_root = "{self.runtime}"',
-                    f'state_db = "{self.state_db}"',
+                    f"memory_root = {json.dumps(str(self.vault), ensure_ascii=False)}",
+                    f"git_root = {json.dumps(str(self.git_root), ensure_ascii=False)}",
+                    f"config_root = {json.dumps(str(self.runtime), ensure_ascii=False)}",
+                    f"state_db = {json.dumps(str(self.state_db), ensure_ascii=False)}",
                 )
             )
             + "\n",
@@ -85,6 +86,7 @@ class DeletionObservationCommandTests(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["AGENT_MEMORY_CONFIG_FILE"] = str(config_path)
         self.env["HOME"] = str(self.root)
+        self.env["USERPROFILE"] = str(self.root)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -148,7 +150,7 @@ class DeletionObservationCommandTests(unittest.TestCase):
         expected_sentinel = f"deleted:{self.deletion_commit}:{prior_sha256}"
         self.assertEqual(parse_deleted_observation(expected_sentinel), (self.deletion_commit, prior_sha256))
         self.assertIsNone(parse_deleted_observation(f"deleted:{self.deletion_commit}:bad"))
-        with sqlite3.connect(self.state_db) as conn:
+        with contextlib.closing(sqlite3.connect(self.state_db)) as conn, conn:
             audit = conn.execute(
                 """
                 SELECT actor, user_authorized, deletion_commit, prior_sha256,
@@ -171,7 +173,7 @@ class DeletionObservationCommandTests(unittest.TestCase):
         repeated = self.observe(apply=True)
         self.assertEqual(repeated.returncode, 0, repeated.stderr + repeated.stdout)
         self.assertEqual(json.loads(repeated.stdout)["applied"], 0)
-        with sqlite3.connect(self.state_db) as conn:
+        with contextlib.closing(sqlite3.connect(self.state_db)) as conn, conn:
             count = conn.execute("SELECT COUNT(*) FROM memory_deletion_observations").fetchone()[0]
         self.assertEqual(count, 1)
 
@@ -226,7 +228,10 @@ class DeletionObservationCommandTests(unittest.TestCase):
                 "DELETION_OBSERVATION_LOCK",
                 self.runtime / "locks" / "closeout.lock",
             ),
-            mock.patch.dict(os.environ, {"HOME": str(self.root)}),
+            mock.patch.dict(
+                os.environ,
+                {"HOME": str(self.root), "USERPROFILE": str(self.root)},
+            ),
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             observation = claim.validate_deletion_observation(
