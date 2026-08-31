@@ -681,7 +681,9 @@ def redact_legacy_search_logs() -> dict[str, int]:
     return {"redacted": len(rows), "remaining_raw": remaining}
 
 
-def run_search(args: argparse.Namespace) -> tuple[list[SearchResult], list[str], bool]:
+def run_search(
+    args: argparse.Namespace,
+) -> tuple[list[SearchResult], list[str], bool, dict[str, dict[str, Any]]]:
     started = time.monotonic()
     warnings: list[str] = []
     if STATE_DB.exists() and not bool(getattr(args, "no_log", False)):
@@ -692,6 +694,19 @@ def run_search(args: argparse.Namespace) -> tuple[list[SearchResult], list[str],
             warnings.append(f"sqlite schema migration failed: {exc}")
     result_groups: list[list[SearchResult]] = []
     successful_backends: set[str] = set()
+    backend_status: dict[str, dict[str, Any]] = {
+        "sqlite": {"status": "pending", "results": 0, "warnings": []},
+        "zvec": {
+            "status": "pending" if not args.no_zvec else "skipped",
+            "results": 0,
+            "warnings": [],
+        },
+        "rg": {
+            "status": "pending" if args.force_rg else "skipped",
+            "results": 0,
+            "warnings": [],
+        },
+    }
     with ThreadPoolExecutor(max_workers=3) as executor:
         tasks = {executor.submit(sqlite_search, args): "sqlite"}
         if not args.no_zvec:
@@ -706,6 +721,11 @@ def run_search(args: argparse.Namespace) -> tuple[list[SearchResult], list[str],
                 rows, task_warnings = [], [f"search task failed: {exc}"]
             if rows or not task_warnings:
                 successful_backends.add(backend)
+            backend_status[backend] = {
+                "status": "ok" if rows or not task_warnings else "error",
+                "results": len(rows),
+                "warnings": [str(item) for item in task_warnings],
+            }
             warnings.extend(task_warnings)
             result_groups.append(rows)
     rows = merge_results(result_groups)
@@ -716,7 +736,7 @@ def run_search(args: argparse.Namespace) -> tuple[list[SearchResult], list[str],
     if not bool(getattr(args, "no_log", False)):
         log_search(args.query, rows, round((time.monotonic() - started) * 1000))
     all_enabled_backends_failed = not successful_backends
-    return rows, warnings, all_enabled_backends_failed
+    return rows, warnings, all_enabled_backends_failed, backend_status
 
 
 def print_human(query: str, rows: list[SearchResult], warnings: list[str]) -> None:
@@ -824,9 +844,20 @@ def main() -> int:
         else:
             print(f"redacted={payload['redacted']} remaining_raw={payload['remaining_raw']}")
         return 0
-    rows, warnings, all_enabled_backends_failed = run_search(args)
+    rows, warnings, all_enabled_backends_failed, backend_status = run_search(args)
     if args.json:
-        print(json.dumps({"query": args.query, "results": [row.to_dict() for row in rows], "warnings": warnings}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "query": args.query,
+                    "results": [row.to_dict() for row in rows],
+                    "warnings": warnings,
+                    "backend_status": backend_status,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         print_human(args.query, rows, warnings)
     return 2 if all_enabled_backends_failed and not rows else 0

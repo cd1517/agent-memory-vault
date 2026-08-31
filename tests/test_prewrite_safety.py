@@ -46,7 +46,7 @@ class PrivateSearchTransportTests(unittest.TestCase):
             "stderr": "",
         }
         with mock.patch.object(closeout, "run_command", return_value=result) as invoked:
-            rows, warnings = closeout.search_memory(
+            rows, warnings, backend_status = closeout.search_memory(
                 private_summary,
                 read_only=True,
                 app_id="yichen-content-studio",
@@ -54,6 +54,7 @@ class PrivateSearchTransportTests(unittest.TestCase):
             )
         self.assertEqual(rows, [])
         self.assertEqual(warnings, [])
+        self.assertEqual(backend_status["sqlite"]["status"], "ok")
         command = invoked.call_args.args[0]
         self.assertNotIn(private_summary, command)
         self.assertIn("--query-stdin", command)

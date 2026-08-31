@@ -413,19 +413,23 @@ class SearchBoundaryTests(unittest.TestCase):
             mock.patch.object(search, "sqlite_search", return_value=([], ["sqlite failed"])),
             mock.patch.object(search, "zvec_search", return_value=([], ["zvec failed"])),
         ):
-            rows, warnings, all_failed = search.run_search(search_args)
+            rows, warnings, all_failed, backend_status = search.run_search(search_args)
         self.assertEqual(rows, [])
         self.assertTrue(all_failed)
         self.assertCountEqual(warnings, ["sqlite failed", "zvec failed"])
+        self.assertEqual(backend_status["sqlite"]["status"], "error")
+        self.assertEqual(backend_status["zvec"]["status"], "error")
 
         with (
             mock.patch.object(search, "sqlite_search", return_value=([], ["sqlite failed"])),
             mock.patch.object(search, "zvec_search", return_value=([], [])),
         ):
-            rows, warnings, all_failed = search.run_search(search_args)
+            rows, warnings, all_failed, backend_status = search.run_search(search_args)
         self.assertEqual(rows, [])
         self.assertFalse(all_failed)
         self.assertEqual(warnings, ["sqlite failed"])
+        self.assertEqual(backend_status["sqlite"]["status"], "error")
+        self.assertEqual(backend_status["zvec"]["status"], "ok")
 
     def test_main_returns_nonzero_only_for_total_backend_failure_without_results(self) -> None:
         cli_args = args(
@@ -436,16 +440,39 @@ class SearchBoundaryTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(search, "parse_args", return_value=cli_args),
-            mock.patch.object(search, "run_search", return_value=([], ["all failed"], True)),
+            mock.patch.object(
+                search,
+                "run_search",
+                return_value=(
+                    [],
+                    ["all failed"],
+                    True,
+                    {"sqlite": {"status": "error"}},
+                ),
+            ),
             contextlib.redirect_stdout(output),
         ):
             self.assertEqual(search.main(), 2)
-        self.assertEqual(json.loads(output.getvalue())["warnings"], ["all failed"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["warnings"], ["all failed"])
+        self.assertEqual(payload["backend_status"]["sqlite"]["status"], "error")
 
         output = io.StringIO()
         with (
             mock.patch.object(search, "parse_args", return_value=cli_args),
-            mock.patch.object(search, "run_search", return_value=([], ["sqlite degraded"], False)),
+            mock.patch.object(
+                search,
+                "run_search",
+                return_value=(
+                    [],
+                    ["sqlite degraded"],
+                    False,
+                    {
+                        "sqlite": {"status": "error"},
+                        "zvec": {"status": "ok"},
+                    },
+                ),
+            ),
             contextlib.redirect_stdout(output),
         ):
             self.assertEqual(search.main(), 0)

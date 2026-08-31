@@ -348,7 +348,11 @@ class CloseoutReconcileStatusTests(unittest.TestCase):
             path=project_note,
         )
         args = Namespace(reconcile_all=False, limit=8, no_zvec=True, current_project="")
-        with mock.patch.object(self.module, "search_memory", return_value=([], [])) as search:
+        with mock.patch.object(
+            self.module,
+            "search_memory",
+            return_value=([], [], {"sqlite": {"status": "ok"}}),
+        ) as search:
             findings, warnings = self.module.postwrite_reconcile([entry], args)
 
         self.assertEqual(findings, [])
@@ -402,7 +406,11 @@ class CloseoutReconcileStatusTests(unittest.TestCase):
             merge_coverage_threshold=0.35,
             semantic_merge_threshold=0.32,
         )
-        with mock.patch.object(self.module, "search_memory", return_value=(rows, [])):
+        with mock.patch.object(
+            self.module,
+            "search_memory",
+            return_value=(rows, [], {"sqlite": {"status": "ok"}}),
+        ):
             findings, warnings = self.module.postwrite_reconcile([entry], args)
 
         self.assertEqual(findings, [])

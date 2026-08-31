@@ -613,7 +613,7 @@ def prepare(request: dict[str, Any], *, raw_session_id: str) -> dict[str, Any]:
             "proposal_canonical_sha256": digest.canonical_sha256,
         }
 
-    rows, warnings = memory_closeout.search_memory(
+    rows, warnings, backend_status = memory_closeout.search_memory(
         summary,
         limit=8,
         no_zvec=not memory_closeout.SEMANTIC_ENABLED,
@@ -623,7 +623,7 @@ def prepare(request: dict[str, Any], *, raw_session_id: str) -> dict[str, Any]:
         agent_scope="shared",
         project_id=project_id,
     )
-    if not rows and any("search failed" in warning.casefold() for warning in warnings):
+    if backend_status.get("sqlite", {}).get("status") != "ok":
         _raise("RECONCILE_UNAVAILABLE", retryable=True)
     scoped_rows: list[dict[str, Any]] = []
     scoped_candidates: list[dict[str, Any]] = []

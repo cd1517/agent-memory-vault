@@ -225,7 +225,7 @@ def search_candidates(
     candidate_limit = min(max(max_results * 32, 128), MAX_CANDIDATES_HARD_LIMIT)
     warnings: list[dict[str, str]] = []
     try:
-        rows, backend_warnings, all_failed = memory_search.run_search(
+        rows, backend_warnings, all_failed, _backend_status = memory_search.run_search(
             _search_namespace(
                 query,
                 candidate_limit,
