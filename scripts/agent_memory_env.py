@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import ast
+import shlex
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,13 @@ def load_dotenv() -> dict[str, str]:
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
-            line = line[7:].lstrip()
+            try:
+                fields = shlex.split(line[7:], comments=True, posix=True)
+            except ValueError:
+                continue
+            if len(fields) != 1:
+                continue
+            line = fields[0]
         key, separator, raw_value = line.partition("=")
         key = key.strip()
         if not separator or not key.isidentifier():
